@@ -69,10 +69,10 @@ async function invokeSolver(
   runId: string,
   payload: { crews: Crew[]; branches: Branch[]; properties: Property[] }
 ) {
-  const url = PYTHON_SOLVER_URL || '/api/python/optimize';
-  const fullUrl = url.startsWith('http')
-    ? url
-    : `${process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000'}${url}`;
+  const path = '/api/python/optimize';
+  const fullUrl = PYTHON_SOLVER_URL
+    ? PYTHON_SOLVER_URL
+    : `${process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000'}${path}`;
 
   const res = await fetch(fullUrl, {
     method: 'POST',
