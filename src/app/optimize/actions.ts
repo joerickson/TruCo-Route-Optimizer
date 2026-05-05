@@ -74,12 +74,17 @@ async function invokeSolver(
   runId: string,
   payload: { crews: Crew[]; branches: Branch[]; properties: Property[] }
 ) {
-  const path = '/api/solver';
-  const fullUrl = PYTHON_SOLVER_URL
-    ? PYTHON_SOLVER_URL
-    : `${process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000'}${path}`;
+  // The Python solver runs in a separate Vercel project (Next.js + Python can't
+  // coexist in one project — Next.js claims /api/* at the routing layer). Set
+  // PYTHON_SOLVER_URL on this project to the full solver URL, e.g.
+  //   https://truco-solver.vercel.app/api/solver
+  if (!PYTHON_SOLVER_URL) {
+    throw new Error(
+      'PYTHON_SOLVER_URL is not configured. Set it on this Vercel project to the deployed Python solver URL (e.g. https://truco-solver.vercel.app/api/solver).'
+    );
+  }
 
-  const res = await fetch(fullUrl, {
+  const res = await fetch(PYTHON_SOLVER_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
     body: JSON.stringify({ run_id: runId, ...payload }),
