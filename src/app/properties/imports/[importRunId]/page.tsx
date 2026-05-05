@@ -1,9 +1,10 @@
 import Link from 'next/link';
-import { notFound } from 'next/navigation';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Badge } from '@/components/ui/badge';
-import { getServerClient } from '@/lib/supabase';
+// Service client (server-only): import metadata is internal admin data and the
+// import action writes with the service role, so reads with anon may be hidden by RLS.
+import { getServiceClient } from '@/lib/supabase';
 import { SkippedRowsTable, type SkippedRowDTO } from './skipped-table';
 
 export const dynamic = 'force-dynamic';
@@ -19,8 +20,8 @@ interface ImportRunRow {
 }
 
 export default async function ImportRunPage({ params }: { params: { importRunId: string } }) {
-  const supabase = getServerClient();
-  const [{ data: run }, { data: skipped }] = await Promise.all([
+  const supabase = getServiceClient();
+  const [{ data: run, error: runErr }, { data: skipped }] = await Promise.all([
     supabase.from('import_runs').select('*').eq('id', params.importRunId).maybeSingle(),
     supabase
       .from('import_skipped_rows')
@@ -29,7 +30,33 @@ export default async function ImportRunPage({ params }: { params: { importRunId:
       .order('row_number', { ascending: true }),
   ]);
 
-  if (!run) notFound();
+  if (!run) {
+    return (
+      <div className="space-y-6">
+        <Card className="border-destructive/40">
+          <CardHeader>
+            <CardTitle>Import run not found</CardTitle>
+            <CardDescription>
+              No import run with id <code className="font-mono text-xs">{params.importRunId}</code> exists.
+              {runErr && <> The database returned: <em>{runErr.message}</em>.</>}
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="text-sm text-muted-foreground">
+            <p>
+              If you just uploaded a file and were redirected here, this likely means RLS is enabled on{' '}
+              <code>import_runs</code> without an anon-read policy. The fix has shipped — try re-uploading.
+            </p>
+            <div className="mt-3">
+              <Link href="/properties" className="text-primary hover:underline">
+                ← Back to properties
+              </Link>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+    );
+  }
+
   const importRun = run as ImportRunRow;
   const skippedRows: SkippedRowDTO[] = (skipped ?? []).map((s) => ({
     row_number: s.row_number,
