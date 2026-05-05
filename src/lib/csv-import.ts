@@ -1,5 +1,6 @@
 // Aspire CSV/XLSX import — maps Aspire export columns to our properties schema.
 import Papa from 'papaparse';
+import * as XLSX from 'xlsx';
 import type { ServiceType } from './types';
 
 export interface AspireImportRow {
@@ -36,12 +37,17 @@ const SERVICE_MAP: Record<string, ServiceType> = {
   'monthly': 'monthly',
 };
 
-function parseAspireDate(s: string | null | undefined): string | null {
+function parseAspireDate(v: unknown): string | null {
+  if (v == null || v === '') return null;
+  // xlsx with cellDates: true gives us a Date object directly.
+  if (v instanceof Date) {
+    if (isNaN(v.getTime())) return null;
+    return v.toISOString().slice(0, 10);
+  }
+  const s = typeof v === 'string' ? v.trim() : String(v).trim();
   if (!s) return null;
-  const trimmed = s.trim();
-  if (!trimmed) return null;
-  // Aspire exports vary: "MM/DD/YYYY", "YYYY-MM-DD", or Excel serial via xlsx.
-  const d = new Date(trimmed);
+  // Aspire exports vary: "MM/DD/YYYY" or "YYYY-MM-DD".
+  const d = new Date(s);
   if (isNaN(d.getTime())) return null;
   return d.toISOString().slice(0, 10);
 }
@@ -82,10 +88,21 @@ function mapRow(raw: Record<string, unknown>, rowIdx: number): AspireImportRow |
     state: 'UT',
     service_type: serviceType,
     est_labor_hours: estHrs,
-    contract_start_date: parseAspireDate(get('Opportunity Start Date')),
-    contract_end_date: parseAspireDate(get('Opportunity End Date')),
+    contract_start_date: parseAspireDate(raw['Opportunity Start Date']),
+    contract_end_date: parseAspireDate(raw['Opportunity End Date']),
     notes: opportunityName,
   };
+}
+
+function mapAll(rawRows: Array<Record<string, unknown>>): ImportResult {
+  const rows: AspireImportRow[] = [];
+  const errors: ImportError[] = [];
+  rawRows.forEach((raw, idx) => {
+    const result = mapRow(raw, idx + 2); // +2 = header row + 1-indexed
+    if ('reason' in result) errors.push(result);
+    else rows.push(result);
+  });
+  return { rows, errors };
 }
 
 export function parseAspireCsv(csvText: string): ImportResult {
@@ -95,18 +112,41 @@ export function parseAspireCsv(csvText: string): ImportResult {
     transformHeader: (h) => h.trim(),
   });
 
-  const rows: AspireImportRow[] = [];
-  const errors: ImportError[] = [];
-
-  parsed.data.forEach((raw, idx) => {
-    const result = mapRow(raw, idx + 2); // +2 because of header + 1-indexed
-    if ('reason' in result) errors.push(result);
-    else rows.push(result);
-  });
-
+  const result = mapAll(parsed.data);
   parsed.errors.forEach((e) => {
-    errors.push({ row: e.row ?? -1, reason: e.message, raw: {} });
+    result.errors.push({ row: e.row ?? -1, reason: e.message, raw: {} });
   });
+  return result;
+}
 
-  return { rows, errors };
+export function parseAspireXlsx(buffer: ArrayBuffer): ImportResult {
+  const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
+  const firstSheetName = workbook.SheetNames[0];
+  if (!firstSheetName) {
+    return { rows: [], errors: [{ row: -1, reason: 'Workbook contains no sheets', raw: {} }] };
+  }
+  const sheet = workbook.Sheets[firstSheetName];
+  // sheet_to_json with header:1 gives an array-of-arrays; default (no header opt) gives objects keyed by header row.
+  // defval:'' so missing cells are empty strings (matches our get() logic).
+  const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
+    defval: '',
+    raw: true, // keep numbers as numbers, dates as Date objects (with cellDates above)
+  });
+  // Trim header keys — xlsx preserves leading/trailing whitespace.
+  const trimmed = json.map((row) => {
+    const out: Record<string, unknown> = {};
+    for (const k of Object.keys(row)) out[k.trim()] = row[k];
+    return out;
+  });
+  return mapAll(trimmed);
+}
+
+export function parseAspireFile(filename: string, buffer: ArrayBuffer): ImportResult {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith('.xlsx') || lower.endsWith('.xlsm') || lower.endsWith('.xls')) {
+    return parseAspireXlsx(buffer);
+  }
+  // default: CSV
+  const text = new TextDecoder('utf-8').decode(buffer);
+  return parseAspireCsv(text);
 }

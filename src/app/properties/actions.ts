@@ -1,7 +1,7 @@
 'use server';
 import { revalidatePath } from 'next/cache';
 import { getServiceClient } from '@/lib/supabase';
-import { parseAspireCsv } from '@/lib/csv-import';
+import { parseAspireFile } from '@/lib/csv-import';
 import { geocodeAddress } from '@/lib/geocoding';
 
 export async function importAspireCsv(formData: FormData) {
@@ -9,8 +9,8 @@ export async function importAspireCsv(formData: FormData) {
   if (!(file instanceof File) || file.size === 0) {
     return { ok: false, error: 'No file uploaded' };
   }
-  const text = await file.text();
-  const { rows, errors } = parseAspireCsv(text);
+  const buffer = await file.arrayBuffer();
+  const { rows, errors } = parseAspireFile(file.name, buffer);
 
   if (rows.length === 0) {
     return { ok: false, error: `No valid rows. ${errors.length} parse errors.`, errors: errors.slice(0, 10) };

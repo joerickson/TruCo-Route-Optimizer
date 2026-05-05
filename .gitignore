@@ -23,6 +23,9 @@ venv/
 # vercel
 .vercel
 
+# supabase cli local cache
+supabase/.temp/
+
 # misc
 .DS_Store
 *.log

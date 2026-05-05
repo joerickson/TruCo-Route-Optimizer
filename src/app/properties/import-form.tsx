@@ -12,11 +12,11 @@ export function ImportForm() {
   return (
     <Card>
       <CardHeader>
-        <CardTitle>Aspire CSV import</CardTitle>
+        <CardTitle>Aspire import</CardTitle>
         <CardDescription>
-          Upload an Aspire export. Columns expected: <code>Property</code>, <code>Property Address 1</code>,{' '}
-          <code>Property City</code>, <code>Service Abr</code>, <code>Est Hrs</code>, <code>Opportunity Start Date</code>,{' '}
-          <code>Opportunity End Date</code>.
+          Upload an Aspire export (.xlsx or .csv). Columns expected: <code>Property</code>,{' '}
+          <code>Property Address 1</code>, <code>Property City</code>, <code>Service Abr</code>, <code>Est Hrs</code>,{' '}
+          <code>Opportunity Start Date</code>, <code>Opportunity End Date</code>.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
@@ -41,7 +41,7 @@ export function ImportForm() {
           <input
             type="file"
             name="file"
-            accept=".csv"
+            accept=".csv,.xlsx,.xls,.xlsm,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
             required
             className="block text-sm file:mr-3 file:rounded-md file:border-0 file:bg-secondary file:px-3 file:py-2 file:text-sm file:font-medium file:text-secondary-foreground hover:file:bg-secondary/80"
           />
