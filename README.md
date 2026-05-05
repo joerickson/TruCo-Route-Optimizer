@@ -40,7 +40,7 @@ npm run dev
 - `SUPABASE_SERVICE_ROLE_KEY` — service-role key for trusted server actions
 - `GOOGLE_MAPS_API_KEY` — geocoding
 - `NEXT_PUBLIC_MAPBOX_TOKEN` — public Mapbox token for map views
-- `PYTHON_SOLVER_URL` *(optional)* — override solver URL (defaults to `/api/python/optimize`)
+- `PYTHON_SOLVER_URL` *(optional)* — override solver URL (defaults to `/api/solver`)
 
 ## Workflow
 

@@ -8,7 +8,7 @@ Inputs (per day):
                           per-crew start depots; remaining indices are properties
 
 Output:
-  - list[CrewDayRoute] (see types in api/python/optimize.py)
+  - list[CrewDayRoute] (see types in api/solver.py)
   - per-crew metrics aggregated by caller
 """
 from __future__ import annotations

@@ -1,4 +1,4 @@
-"""Vercel Python serverless function: POST /api/python/optimize
+"""Vercel Python serverless function: POST /api/solver
 
 Body (from Next.js server action):
   {
@@ -24,7 +24,7 @@ import time
 from http.server import BaseHTTPRequestHandler
 from typing import Any
 
-from solver import solve_day  # noqa: E402
+from solver_logic import solve_day  # noqa: E402
 
 try:
     from supabase import create_client  # type: ignore

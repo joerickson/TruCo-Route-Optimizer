@@ -74,7 +74,7 @@ async function invokeSolver(
   runId: string,
   payload: { crews: Crew[]; branches: Branch[]; properties: Property[] }
 ) {
-  const path = '/api/python/optimize';
+  const path = '/api/solver';
   const fullUrl = PYTHON_SOLVER_URL
     ? PYTHON_SOLVER_URL
     : `${process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : 'http://localhost:3000'}${path}`;
