@@ -3,8 +3,8 @@
   "framework": "nextjs",
   "functions": {
     "api/python/optimize.py": {
-      "maxDuration": 300,
-      "memory": 3008
+      "runtime": "@vercel/python@6.38.0",
+      "maxDuration": 300
     }
   }
 }
