@@ -1,4 +1,9 @@
-"""Vercel Python serverless function: POST /api/solver
+"""Vercel Python serverless function: POST /api/index
+
+Note on filename: Vercel's @vercel/python@6 auto-detector only recognizes
+entrypoints named app.py / index.py / server.py / main.py / wsgi.py /
+asgi.py. We use index.py with a BaseHTTPRequestHandler `handler` class —
+this is an accepted top-level name per Vercel docs.
 
 Body (from Next.js server action):
   {
@@ -20,16 +25,39 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import time
+import traceback
 from http.server import BaseHTTPRequestHandler
 from typing import Any
 
-from solver_logic import solve_day  # noqa: E402
+# @vercel/python doesn't add the entrypoint's directory to sys.path, so sibling
+# .py files in api/ can't be imported by name without this. Without it,
+# `from solver_logic import ...` raises ModuleNotFoundError at runtime.
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+# Diagnostic: capture import failures so the GET health check can report them
+# instead of the function silently 500ing on invocation.
+_IMPORT_ERRORS: list[str] = []
+
+try:
+    from solver_logic import solve_day
+except Exception as e:
+    solve_day = None  # type: ignore
+    _IMPORT_ERRORS.append(f"solver_logic: {type(e).__name__}: {e}")
 
 try:
     from supabase import create_client  # type: ignore
-except Exception:  # pragma: no cover
+except Exception as e:  # pragma: no cover
     create_client = None  # type: ignore
+    _IMPORT_ERRORS.append(f"supabase: {type(e).__name__}: {e}")
+
+try:
+    import ortools  # noqa: F401
+    _ortools_version = getattr(ortools, '__version__', 'unknown')
+except Exception as e:
+    _ortools_version = f"IMPORT FAILED: {type(e).__name__}: {e}"
+    _IMPORT_ERRORS.append(f"ortools: {type(e).__name__}: {e}")
 
 
 WEEKDAY_FIELDS = {
@@ -311,7 +339,18 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(err).encode("utf-8"))
 
     def do_GET(self):  # noqa: N802
+        # Health check + diagnostic. Returns import status so we can debug
+        # FUNCTION_INVOCATION_FAILED without trawling Vercel logs.
+        body = {
+            "ok": len(_IMPORT_ERRORS) == 0,
+            "service": "truco-optimizer",
+            "python_version": sys.version,
+            "ortools_version": _ortools_version,
+            "import_errors": _IMPORT_ERRORS,
+            "supabase_url_set": bool(os.environ.get("NEXT_PUBLIC_SUPABASE_URL") or os.environ.get("SUPABASE_URL")),
+            "supabase_key_set": bool(os.environ.get("SUPABASE_SERVICE_ROLE_KEY")),
+        }
         self.send_response(200)
         self.send_header("content-type", "application/json")
         self.end_headers()
-        self.wfile.write(b'{"ok": true, "service": "truco-optimizer"}')
+        self.wfile.write(json.dumps(body).encode("utf-8"))
