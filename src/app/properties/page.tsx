@@ -10,6 +10,9 @@ import type { Property } from '@/lib/types';
 import type { MapBranch, MapProperty } from './properties-map';
 
 export const dynamic = 'force-dynamic';
+// Imports can run long on large re-uploads; raise from the default to give
+// the bulk-upsert path headroom. The Python solver is configured separately.
+export const maxDuration = 60;
 
 const PAGE_SIZE = 100;
 

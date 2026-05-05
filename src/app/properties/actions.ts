@@ -1,7 +1,7 @@
 'use server';
 import { revalidatePath } from 'next/cache';
 import { getServiceClient } from '@/lib/supabase';
-import { parseAspireFile, type AspireImportRow, type SkippedRow } from '@/lib/csv-import';
+import { parseAspireFile, type AspireImportRow } from '@/lib/csv-import';
 import { geocodeAddress } from '@/lib/geocoding';
 
 export interface ImportSummary {
@@ -15,79 +15,90 @@ export interface ImportSummary {
 export type ImportActionResult = ImportSummary | { ok: false; error: string };
 
 export async function importAspireCsv(formData: FormData): Promise<ImportActionResult> {
-  const file = formData.get('file');
-  if (!(file instanceof File) || file.size === 0) {
-    return { ok: false, error: 'No file uploaded' };
-  }
-  const buffer = await file.arrayBuffer();
-  const { rows, skipped } = parseAspireFile(file.name, buffer);
-  const totalRows = rows.length + skipped.length;
-
-  if (totalRows === 0) {
-    return { ok: false, error: 'No rows found in file' };
-  }
-
-  const supabase = getServiceClient();
-
-  const { data: importRun, error: runErr } = await supabase
-    .from('import_runs')
-    .insert({
-      filename: file.name,
-      total_rows: totalRows,
-      skipped_count: skipped.length,
-    })
-    .select('id')
-    .single();
-
-  if (runErr || !importRun) {
-    return { ok: false, error: runErr?.message ?? 'Could not create import run' };
-  }
-
-  if (skipped.length > 0) {
-    const skippedRecords = skipped.map((s) => ({
-      import_run_id: importRun.id,
-      row_number: s.row_number,
-      property_name: s.property_name,
-      city: s.city,
-      reason: s.reason,
-      raw_data: serializeRaw(s.raw),
-    }));
-    const { error: skipErr } = await supabase.from('import_skipped_rows').insert(skippedRecords);
-    if (skipErr) {
-      // Don't abort — the property data is more important than the audit trail.
-      console.error('Failed to persist skipped rows:', skipErr.message);
+  // Wrap everything: any throw from the parser, Supabase, or applyRows should come back
+  // as a structured error rather than crashing the server function (which surfaces as
+  // ERR_CONNECTION_CLOSED in the browser).
+  try {
+    const file = formData.get('file');
+    if (!(file instanceof File) || file.size === 0) {
+      return { ok: false, error: 'No file uploaded' };
     }
+    const buffer = await file.arrayBuffer();
+    const { rows, skipped } = parseAspireFile(file.name, buffer);
+    const totalRows = rows.length + skipped.length;
+
+    if (totalRows === 0) {
+      return { ok: false, error: 'No rows found in file' };
+    }
+
+    const supabase = getServiceClient();
+
+    const { data: importRun, error: runErr } = await supabase
+      .from('import_runs')
+      .insert({
+        filename: file.name,
+        total_rows: totalRows,
+        skipped_count: skipped.length,
+      })
+      .select('id')
+      .single();
+
+    if (runErr || !importRun) {
+      return { ok: false, error: runErr?.message ?? 'Could not create import run' };
+    }
+
+    if (skipped.length > 0) {
+      const skippedRecords = skipped.map((s) => ({
+        import_run_id: importRun.id,
+        row_number: s.row_number,
+        property_name: s.property_name,
+        city: s.city,
+        reason: s.reason,
+        raw_data: serializeRaw(s.raw),
+      }));
+      const { error: skipErr } = await supabase.from('import_skipped_rows').insert(skippedRecords);
+      if (skipErr) {
+        // Don't abort — the property data is more important than the audit trail.
+        console.error('Failed to persist skipped rows:', skipErr.message);
+      }
+    }
+
+    let inserted = 0;
+    let updated = 0;
+
+    if (rows.length > 0) {
+      const result = await applyRows(rows);
+      inserted = result.inserted;
+      updated = result.updated;
+    }
+
+    await supabase
+      .from('import_runs')
+      .update({ inserted_count: inserted, updated_count: updated })
+      .eq('id', importRun.id);
+
+    revalidatePath('/properties');
+    return {
+      ok: true,
+      import_run_id: importRun.id,
+      inserted,
+      updated,
+      skipped: skipped.length,
+    };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
-
-  let inserted = 0;
-  let updated = 0;
-
-  if (rows.length > 0) {
-    const result = await applyRows(rows);
-    inserted = result.inserted;
-    updated = result.updated;
-  }
-
-  await supabase
-    .from('import_runs')
-    .update({ inserted_count: inserted, updated_count: updated })
-    .eq('id', importRun.id);
-
-  revalidatePath('/properties');
-  return {
-    ok: true,
-    import_run_id: importRun.id,
-    inserted,
-    updated,
-    skipped: skipped.length,
-  };
 }
 
 // Dedup logic:
-//   1. external_id present → upsert by external_id
+//   1. external_id present → upsert by external_id (single round-trip)
 //   2. else → match against existing properties by (lower(name), lower(address))
-//      - found: update fields
-//      - not found: insert
+//      - found: bulk upsert by id (single round-trip — was N sequential UPDATEs)
+//      - not found: bulk insert
+//
+// The previous implementation did one UPDATE per matched row, which on a 564-row
+// re-import meant ~80s of round-trips and timed out. Bulk upsert collapses each
+// branch to a single PostgREST call.
 async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; updated: number }> {
   const supabase = getServiceClient();
 
@@ -98,20 +109,19 @@ async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; u
   const noExt = rows.filter((r) => !r.external_id);
 
   if (withExt.length > 0) {
-    // Determine inserts vs updates by checking which external_ids already exist.
     const ids = withExt.map((r) => r.external_id!);
-    const { data: existing } = await supabase
+    const { data: existing, error: existingErr } = await supabase
       .from('properties')
       .select('external_id')
       .in('external_id', ids);
+    if (existingErr) throw new Error(existingErr.message);
+
     const existingSet = new Set((existing ?? []).map((e: { external_id: string | null }) => e.external_id));
-    const updates = withExt.filter((r) => existingSet.has(r.external_id));
-    const inserts = withExt.filter((r) => !existingSet.has(r.external_id));
+    inserted += withExt.filter((r) => !existingSet.has(r.external_id)).length;
+    updated += withExt.filter((r) => existingSet.has(r.external_id)).length;
 
     const { error } = await supabase.from('properties').upsert(withExt, { onConflict: 'external_id' });
     if (error) throw new Error(error.message);
-    inserted += inserts.length;
-    updated += updates.length;
   }
 
   if (noExt.length > 0) {
@@ -123,15 +133,15 @@ async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; u
 
     const keyOf = (n: string, a: string) => `${n.trim().toLowerCase()}::${a.trim().toLowerCase()}`;
     const idByKey = new Map<string, string>();
-    for (const p of existing ?? []) {
+    for (const p of (existing ?? []) as Array<{ id: string; name: string; address: string }>) {
       idByKey.set(keyOf(p.name, p.address), p.id);
     }
 
     const toInsert: AspireImportRow[] = [];
-    const toUpdate: Array<{ id: string; row: AspireImportRow }> = [];
+    const toUpdate: Array<AspireImportRow & { id: string }> = [];
     for (const r of noExt) {
       const id = idByKey.get(keyOf(r.name, r.address));
-      if (id) toUpdate.push({ id, row: r });
+      if (id) toUpdate.push({ ...r, id });
       else toInsert.push(r);
     }
 
@@ -141,11 +151,25 @@ async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; u
       inserted += toInsert.length;
     }
 
-    // Update one at a time — Supabase PostgREST doesn't bulk-update with per-row patches in one call.
-    for (const u of toUpdate) {
-      const { error } = await supabase.from('properties').update(u.row).eq('id', u.id);
+    if (toUpdate.length > 0) {
+      // Bulk upsert by primary key — single round-trip update for all matched rows.
+      // Important: omit external_id from the payload. Otherwise each AspireImportRow's
+      // null external_id would null out any existing external_id on the matched DB row.
+      const updatePayload = toUpdate.map((r) => ({
+        id: r.id,
+        name: r.name,
+        address: r.address,
+        city: r.city,
+        state: r.state,
+        service_type: r.service_type,
+        est_labor_hours: r.est_labor_hours,
+        contract_start_date: r.contract_start_date,
+        contract_end_date: r.contract_end_date,
+        notes: r.notes,
+      }));
+      const { error } = await supabase.from('properties').upsert(updatePayload, { onConflict: 'id' });
       if (error) throw new Error(error.message);
-      updated += 1;
+      updated += toUpdate.length;
     }
   }
 

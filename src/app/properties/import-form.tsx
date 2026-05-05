@@ -28,9 +28,15 @@ export function ImportForm() {
             setSummary(null);
             setError(null);
             startTransition(async () => {
-              const r = await importAspireCsv(fd);
-              if (r.ok) setSummary(r);
-              else setError(r.error);
+              try {
+                const r = await importAspireCsv(fd);
+                if (r.ok) setSummary(r);
+                else setError(r.error);
+              } catch (e) {
+                // Catches network failures, server crashes, function timeouts —
+                // anything that prevents the action from returning a structured result.
+                setError(e instanceof Error ? e.message : 'Upload failed (network or server error)');
+              }
             });
           }}
           className="flex items-center gap-3"
