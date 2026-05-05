@@ -1,12 +1,14 @@
 'use client';
 import { useState, useTransition } from 'react';
+import Link from 'next/link';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { importAspireCsv, geocodePending } from './actions';
+import { importAspireCsv, geocodePending, type ImportSummary } from './actions';
 
 export function ImportForm() {
   const [pending, startTransition] = useTransition();
-  const [result, setResult] = useState<string | null>(null);
+  const [summary, setSummary] = useState<ImportSummary | null>(null);
+  const [error, setError] = useState<string | null>(null);
   const [geoResult, setGeoResult] = useState<string | null>(null);
 
   return (
@@ -16,24 +18,19 @@ export function ImportForm() {
         <CardDescription>
           Upload an Aspire export (.xlsx or .csv). Columns expected: <code>Property</code>,{' '}
           <code>Property Address 1</code>, <code>Property City</code>, <code>Service Abr</code>, <code>Est Hrs</code>,{' '}
-          <code>Opportunity Start Date</code>, <code>Opportunity End Date</code>.
+          <code>Opportunity Start Date</code>, <code>Opportunity End Date</code>. Re-uploading is safe — existing properties
+          (matched by external ID, or by name + address) are updated rather than duplicated.
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
         <form
           action={(fd) => {
-            setResult(null);
+            setSummary(null);
+            setError(null);
             startTransition(async () => {
               const r = await importAspireCsv(fd);
-              if (r.ok) {
-                setResult(
-                  `Imported. Inserted ${r.inserted ?? 0}, upserted ${r.upserted ?? 0}.${
-                    r.errorCount ? ` ${r.errorCount} errors skipped.` : ''
-                  }`
-                );
-              } else {
-                setResult(`Error: ${r.error}`);
-              }
+              if (r.ok) setSummary(r);
+              else setError(r.error);
             });
           }}
           className="flex items-center gap-3"
@@ -49,7 +46,34 @@ export function ImportForm() {
             {pending ? 'Importing…' : 'Import'}
           </Button>
         </form>
-        {result && <p className="text-sm">{result}</p>}
+
+        {error && <p className="text-sm text-destructive">{error}</p>}
+
+        {summary && (
+          <div className="rounded-md border bg-muted/40 p-3 text-sm">
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span>
+                <strong>{summary.inserted}</strong> inserted
+              </span>
+              <span>
+                <strong>{summary.updated}</strong> updated
+              </span>
+              <span className={summary.skipped > 0 ? 'text-amber-700' : ''}>
+                <strong>{summary.skipped}</strong> skipped
+              </span>
+            </div>
+            {summary.skipped > 0 && (
+              <div className="mt-2">
+                <Link
+                  href={`/properties/imports/${summary.import_run_id}`}
+                  className="text-primary underline-offset-2 hover:underline"
+                >
+                  View skipped rows →
+                </Link>
+              </div>
+            )}
+          </div>
+        )}
 
         <div className="flex items-center gap-3 border-t pt-4">
           <Button

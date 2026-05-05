@@ -16,15 +16,17 @@ export interface AspireImportRow {
   notes: string | null;
 }
 
-export interface ImportError {
-  row: number;
+export interface SkippedRow {
+  row_number: number; // 1-indexed in source file; header is row 1
+  property_name: string | null;
+  city: string | null;
   reason: string;
   raw: Record<string, unknown>;
 }
 
 export interface ImportResult {
   rows: AspireImportRow[];
-  errors: ImportError[];
+  skipped: SkippedRow[];
 }
 
 const SERVICE_MAP: Record<string, ServiceType> = {
@@ -37,48 +39,78 @@ const SERVICE_MAP: Record<string, ServiceType> = {
   'monthly': 'monthly',
 };
 
-function parseAspireDate(v: unknown): string | null {
-  if (v == null || v === '') return null;
-  // xlsx with cellDates: true gives us a Date object directly.
+const KNOWN_SERVICES = 'Weekly MT, Bi-Weekly, Monthly MT Service';
+
+type DateParseResult = { ok: true; value: string | null } | { ok: false; reason: string };
+
+function parseAspireDate(v: unknown, columnName: string): DateParseResult {
+  // Empty is allowed — some properties have no end date.
+  if (v == null || v === '') return { ok: true, value: null };
   if (v instanceof Date) {
-    if (isNaN(v.getTime())) return null;
-    return v.toISOString().slice(0, 10);
+    if (isNaN(v.getTime())) return { ok: false, reason: `Invalid date in '${columnName}': ${String(v)}` };
+    return { ok: true, value: v.toISOString().slice(0, 10) };
   }
   const s = typeof v === 'string' ? v.trim() : String(v).trim();
-  if (!s) return null;
-  // Aspire exports vary: "MM/DD/YYYY" or "YYYY-MM-DD".
+  if (!s) return { ok: true, value: null };
   const d = new Date(s);
-  if (isNaN(d.getTime())) return null;
-  return d.toISOString().slice(0, 10);
+  if (isNaN(d.getTime())) {
+    return { ok: false, reason: `Invalid date format in '${columnName}': "${s}" (expected MM/DD/YYYY or YYYY-MM-DD)` };
+  }
+  return { ok: true, value: d.toISOString().slice(0, 10) };
 }
 
-function mapRow(raw: Record<string, unknown>, rowIdx: number): AspireImportRow | ImportError {
-  const get = (k: string) => {
-    const v = raw[k];
-    return typeof v === 'string' ? v.trim() : v == null ? '' : String(v).trim();
-  };
+function getStr(raw: Record<string, unknown>, key: string): string {
+  const v = raw[key];
+  if (typeof v === 'string') return v.trim();
+  if (v == null) return '';
+  return String(v).trim();
+}
 
-  const name = get('Property');
-  const address = get('Property Address 1');
-  const city = get('Property City');
-  const serviceAbr = get('Service Abr').toLowerCase();
-  const estHrsStr = get('Est Hrs');
-  const externalId = get('Property ID') || get('External ID') || null;
-  const opportunityName = get('Opportunity Name') || null;
+function mapRow(raw: Record<string, unknown>, rowNumber: number): AspireImportRow | SkippedRow {
+  const name = getStr(raw, 'Property');
+  const address = getStr(raw, 'Property Address 1');
+  const city = getStr(raw, 'Property City');
+  const serviceAbrRaw = getStr(raw, 'Service Abr');
+  const serviceAbr = serviceAbrRaw.toLowerCase();
+  const estHrsStr = getStr(raw, 'Est Hrs');
+  const externalId = getStr(raw, 'Property ID') || getStr(raw, 'External ID') || null;
+  const opportunityName = getStr(raw, 'Opportunity Name') || null;
 
-  if (!name) return { row: rowIdx, reason: 'Missing Property name', raw };
-  if (!address) return { row: rowIdx, reason: 'Missing Property Address 1', raw };
-  if (!city) return { row: rowIdx, reason: 'Missing Property City', raw };
+  const skip = (reason: string): SkippedRow => ({
+    row_number: rowNumber,
+    property_name: name || null,
+    city: city || null,
+    reason,
+    raw,
+  });
 
+  if (!name) return skip("Missing Property name (column 'Property' is empty)");
+  if (!address) return skip("Missing Property address (column 'Property Address 1' is empty)");
+  if (!city) return skip("Missing Property city (column 'Property City' is empty)");
+
+  if (!serviceAbrRaw) {
+    return skip(`Missing 'Service Abr' (expected one of: ${KNOWN_SERVICES})`);
+  }
   const serviceType = SERVICE_MAP[serviceAbr];
   if (!serviceType) {
-    return { row: rowIdx, reason: `Unknown Service Abr: "${serviceAbr}"`, raw };
+    return skip(`Service Abr "${serviceAbrRaw}" not recognized — expected one of: ${KNOWN_SERVICES}`);
   }
 
-  const estHrs = parseFloat(estHrsStr);
-  if (!isFinite(estHrs) || estHrs <= 0) {
-    return { row: rowIdx, reason: `Invalid Est Hrs: "${estHrsStr}"`, raw };
+  if (!estHrsStr) {
+    return skip("Est Hrs is empty; cannot route a property with no time estimate");
   }
+  const estHrs = parseFloat(estHrsStr);
+  if (!isFinite(estHrs)) {
+    return skip(`Est Hrs is not a number: "${estHrsStr}"`);
+  }
+  if (estHrs <= 0) {
+    return skip(`Est Hrs is ${estHrs}; cannot route a property with no time estimate`);
+  }
+
+  const startDate = parseAspireDate(raw['Opportunity Start Date'], 'Opportunity Start Date');
+  if (!startDate.ok) return skip(startDate.reason);
+  const endDate = parseAspireDate(raw['Opportunity End Date'], 'Opportunity End Date');
+  if (!endDate.ok) return skip(endDate.reason);
 
   return {
     external_id: externalId,
@@ -88,21 +120,26 @@ function mapRow(raw: Record<string, unknown>, rowIdx: number): AspireImportRow |
     state: 'UT',
     service_type: serviceType,
     est_labor_hours: estHrs,
-    contract_start_date: parseAspireDate(raw['Opportunity Start Date']),
-    contract_end_date: parseAspireDate(raw['Opportunity End Date']),
+    contract_start_date: startDate.value,
+    contract_end_date: endDate.value,
     notes: opportunityName,
   };
 }
 
+function isSkipped(r: AspireImportRow | SkippedRow): r is SkippedRow {
+  return 'reason' in r;
+}
+
 function mapAll(rawRows: Array<Record<string, unknown>>): ImportResult {
   const rows: AspireImportRow[] = [];
-  const errors: ImportError[] = [];
+  const skipped: SkippedRow[] = [];
   rawRows.forEach((raw, idx) => {
-    const result = mapRow(raw, idx + 2); // +2 = header row + 1-indexed
-    if ('reason' in result) errors.push(result);
+    // idx 0 = first data row. With a header row, that's row 2 in the file (1-indexed, header is row 1).
+    const result = mapRow(raw, idx + 2);
+    if (isSkipped(result)) skipped.push(result);
     else rows.push(result);
   });
-  return { rows, errors };
+  return { rows, skipped };
 }
 
 export function parseAspireCsv(csvText: string): ImportResult {
@@ -114,7 +151,13 @@ export function parseAspireCsv(csvText: string): ImportResult {
 
   const result = mapAll(parsed.data);
   parsed.errors.forEach((e) => {
-    result.errors.push({ row: e.row ?? -1, reason: e.message, raw: {} });
+    result.skipped.push({
+      row_number: typeof e.row === 'number' ? e.row + 2 : -1,
+      property_name: null,
+      city: null,
+      reason: `CSV parse error: ${e.message}`,
+      raw: {},
+    });
   });
   return result;
 }
@@ -123,16 +166,15 @@ export function parseAspireXlsx(buffer: ArrayBuffer): ImportResult {
   const workbook = XLSX.read(buffer, { type: 'array', cellDates: true });
   const firstSheetName = workbook.SheetNames[0];
   if (!firstSheetName) {
-    return { rows: [], errors: [{ row: -1, reason: 'Workbook contains no sheets', raw: {} }] };
+    return {
+      rows: [],
+      skipped: [
+        { row_number: -1, property_name: null, city: null, reason: 'Workbook contains no sheets', raw: {} },
+      ],
+    };
   }
   const sheet = workbook.Sheets[firstSheetName];
-  // sheet_to_json with header:1 gives an array-of-arrays; default (no header opt) gives objects keyed by header row.
-  // defval:'' so missing cells are empty strings (matches our get() logic).
-  const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, {
-    defval: '',
-    raw: true, // keep numbers as numbers, dates as Date objects (with cellDates above)
-  });
-  // Trim header keys — xlsx preserves leading/trailing whitespace.
+  const json = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '', raw: true });
   const trimmed = json.map((row) => {
     const out: Record<string, unknown> = {};
     for (const k of Object.keys(row)) out[k.trim()] = row[k];
@@ -146,7 +188,6 @@ export function parseAspireFile(filename: string, buffer: ArrayBuffer): ImportRe
   if (lower.endsWith('.xlsx') || lower.endsWith('.xlsm') || lower.endsWith('.xls')) {
     return parseAspireXlsx(buffer);
   }
-  // default: CSV
   const text = new TextDecoder('utf-8').decode(buffer);
   return parseAspireCsv(text);
 }

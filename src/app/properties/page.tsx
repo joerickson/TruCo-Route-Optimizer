@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
@@ -27,7 +28,15 @@ export default async function PropertiesPage({
 
   if (q) query = query.ilike('name', `%${q}%`);
 
-  const { data, count, error } = await query;
+  const [{ data, count, error }, { data: lastImport }] = await Promise.all([
+    query,
+    supabase
+      .from('import_runs')
+      .select('id, filename, inserted_count, updated_count, skipped_count, created_at')
+      .order('created_at', { ascending: false })
+      .limit(1)
+      .maybeSingle(),
+  ]);
   const properties = (data ?? []) as Property[];
 
   const totalPages = Math.max(1, Math.ceil((count ?? 0) / PAGE_SIZE));
@@ -46,6 +55,25 @@ export default async function PropertiesPage({
       </div>
 
       <ImportForm />
+
+      {lastImport && (
+        <div className="rounded-md border bg-muted/40 px-4 py-2 text-sm">
+          <span className="text-muted-foreground">Last import: </span>
+          <span className="font-medium">{lastImport.filename ?? 'unknown file'}</span>
+          <span className="text-muted-foreground"> · </span>
+          <span>{lastImport.inserted_count} inserted</span>
+          <span className="text-muted-foreground"> · </span>
+          <span>{lastImport.updated_count} updated</span>
+          <span className="text-muted-foreground"> · </span>
+          <span className={lastImport.skipped_count > 0 ? 'text-amber-700' : ''}>
+            {lastImport.skipped_count} skipped
+          </span>
+          {' · '}
+          <Link href={`/properties/imports/${lastImport.id}`} className="text-primary hover:underline">
+            details →
+          </Link>
+        </div>
+      )}
 
       {error && (
         <Card className="border-destructive/40">
