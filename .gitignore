@@ -1,0 +1,32 @@
+# dependencies
+node_modules
+.pnp
+.pnp.js
+
+# next
+.next/
+out/
+build
+dist
+
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# env
+.env
+.env.local
+.env*.local
+
+# vercel
+.vercel
+
+# misc
+.DS_Store
+*.log
+.idea
+.vscode
+*.tsbuildinfo
+next-env.d.ts

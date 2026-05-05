@@ -1,0 +1,14 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "nextjs",
+  "functions": {
+    "api/python/optimize.py": {
+      "runtime": "python3.12",
+      "maxDuration": 300,
+      "memory": 3008
+    }
+  },
+  "rewrites": [
+    { "source": "/api/python/optimize", "destination": "/api/python/optimize.py" }
+  ]
+}
