@@ -14,7 +14,12 @@ export async function startOptimization(formData: FormData) {
 
   const [{ data: crewsData }, { data: branchesData }, { data: propsData }] = await Promise.all([
     supabase.from('crews').select('*').eq('is_active', true),
-    supabase.from('branches').select('*').eq('is_active', true),
+    supabase
+      .from('branches')
+      .select('*')
+      .eq('is_active', true)
+      .not('lat', 'is', null)
+      .not('lng', 'is', null),
     supabase
       .from('properties')
       .select('*')
@@ -28,7 +33,7 @@ export async function startOptimization(formData: FormData) {
   const properties = (propsData ?? []) as Property[];
 
   if (crews.length === 0) return { ok: false, error: 'No active crews configured' };
-  if (branches.length === 0) return { ok: false, error: 'No active branches configured' };
+  if (branches.length === 0) return { ok: false, error: 'No active geocoded branches configured (check Branches page)' };
   if (properties.length === 0) return { ok: false, error: 'No geocoded active properties' };
 
   const { data: run, error: runErr } = await supabase

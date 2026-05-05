@@ -19,8 +19,10 @@ export interface Branch {
   city: string;
   state: string;
   postal_code: string | null;
-  lat: number;
-  lng: number;
+  // lat/lng are nullable: a branch can be saved with a bad address and re-geocoded later.
+  // The map and optimizer skip branches without coords.
+  lat: number | null;
+  lng: number | null;
   is_active: boolean;
   created_at: string;
 }
