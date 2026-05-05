@@ -4,7 +4,10 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge';
 import { getServerClient } from '@/lib/supabase';
 import { ImportForm } from './import-form';
+import { ViewToggle } from './view-toggle';
+import { PropertiesMapLoader } from './properties-map-loader';
 import type { Property } from '@/lib/types';
+import type { MapBranch, MapProperty } from './properties-map';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,45 +16,109 @@ const PAGE_SIZE = 100;
 export default async function PropertiesPage({
   searchParams,
 }: {
-  searchParams: { page?: string; q?: string };
+  searchParams: { page?: string; q?: string; view?: string };
 }) {
+  const view: 'list' | 'map' = searchParams.view === 'map' ? 'map' : 'list';
   const page = Math.max(1, parseInt(searchParams.page ?? '1', 10) || 1);
   const q = (searchParams.q ?? '').trim();
   const supabase = getServerClient();
 
-  let query = supabase
+  // List query (paginated)
+  let listQuery = supabase
     .from('properties')
     .select('*', { count: 'exact' })
     .eq('is_active', true)
     .order('name')
     .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
+  if (q) listQuery = listQuery.ilike('name', `%${q}%`);
 
-  if (q) query = query.ilike('name', `%${q}%`);
+  // Map query (all geocoded, slim columns) — only fired when needed.
+  const mapPropsP =
+    view === 'map'
+      ? (() => {
+          let mq = supabase
+            .from('properties')
+            .select('id, name, address, city, lat, lng, service_type, est_labor_hours, contract_start_date, contract_end_date')
+            .eq('is_active', true)
+            .not('lat', 'is', null)
+            .not('lng', 'is', null)
+            .limit(2000);
+          if (q) mq = mq.ilike('name', `%${q}%`);
+          return mq;
+        })()
+      : Promise.resolve({ data: null as null });
 
-  const [{ data, count, error }, { data: lastImport }] = await Promise.all([
-    query,
-    supabase
-      .from('import_runs')
-      .select('id, filename, inserted_count, updated_count, skipped_count, created_at')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-  ]);
+  const branchesP =
+    view === 'map'
+      ? supabase.from('branches').select('id, name, address, city, lat, lng').eq('is_active', true)
+      : Promise.resolve({ data: null as null });
+
+  const pendingCountP =
+    view === 'map'
+      ? supabase.from('properties').select('*', { count: 'exact', head: true }).eq('is_active', true).is('lat', null)
+      : Promise.resolve({ count: 0 });
+
+  const lastImportP = supabase
+    .from('import_runs')
+    .select('id, filename, inserted_count, updated_count, skipped_count, created_at')
+    .order('created_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const [
+    { data, count, error },
+    { data: lastImport },
+    { data: mapPropsData },
+    { data: branchesData },
+    { count: pendingCount },
+  ] = await Promise.all([listQuery, lastImportP, mapPropsP, branchesP, pendingCountP]);
+
   const properties = (data ?? []) as Property[];
-
   const totalPages = Math.max(1, Math.ceil((count ?? 0) / PAGE_SIZE));
-
   const ungeocoded = properties.filter((p) => p.lat == null).length;
+
+  const mapProperties: MapProperty[] = ((mapPropsData ?? []) as Property[])
+    .filter((p): p is Property & { lat: number; lng: number } => p.lat != null && p.lng != null)
+    .map((p) => ({
+      id: p.id,
+      name: p.name,
+      address: p.address,
+      city: p.city,
+      lat: Number(p.lat),
+      lng: Number(p.lng),
+      service_type: p.service_type,
+      est_labor_hours: Number(p.est_labor_hours),
+      contract_start_date: p.contract_start_date,
+      contract_end_date: p.contract_end_date,
+    }));
+
+  const mapBranches: MapBranch[] = ((branchesData ?? []) as Array<{
+    id: string;
+    name: string;
+    address: string;
+    city: string;
+    lat: number | string;
+    lng: number | string;
+  }>).map((b) => ({
+    id: b.id,
+    name: b.name,
+    address: b.address,
+    city: b.city,
+    lat: Number(b.lat),
+    lng: Number(b.lng),
+  }));
 
   return (
     <div className="space-y-6">
-      <div className="flex items-end justify-between">
+      <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="text-2xl font-bold tracking-tight">Properties</h1>
           <p className="text-sm text-muted-foreground">
-            {count ?? 0} active properties · {ungeocoded} on this page need geocoding
+            {count ?? 0} active properties
+            {view === 'list' && ` · ${ungeocoded} on this page need geocoding`}
           </p>
         </div>
+        <ViewToggle current={view} search={q} />
       </div>
 
       <ImportForm />
@@ -84,80 +151,95 @@ export default async function PropertiesPage({
         </Card>
       )}
 
-      <Card>
-        <CardHeader>
-          <div className="flex items-center justify-between">
-            <CardTitle>All properties</CardTitle>
-            <form className="flex gap-2">
-              <input
-                type="search"
-                name="q"
-                defaultValue={q}
-                placeholder="Search name…"
-                className="h-9 rounded-md border border-input bg-background px-3 text-sm"
-              />
-            </form>
-          </div>
-        </CardHeader>
-        <CardContent className="p-0">
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead>Name</TableHead>
-                <TableHead>Address</TableHead>
-                <TableHead>City</TableHead>
-                <TableHead>Service</TableHead>
-                <TableHead>Est hrs</TableHead>
-                <TableHead>Geocoded</TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {properties.map((p) => (
-                <TableRow key={p.id}>
-                  <TableCell className="font-medium">{p.name}</TableCell>
-                  <TableCell className="text-muted-foreground">{p.address}</TableCell>
-                  <TableCell>{p.city}</TableCell>
-                  <TableCell>
-                    <Badge variant="secondary">{p.service_type}</Badge>
-                  </TableCell>
-                  <TableCell>{p.est_labor_hours.toFixed(1)}</TableCell>
-                  <TableCell>
-                    {p.lat != null ? (
-                      <Badge variant="success">✓</Badge>
-                    ) : (
-                      <Badge variant="warning">pending</Badge>
-                    )}
-                  </TableCell>
-                </TableRow>
-              ))}
-              {properties.length === 0 && (
+      {view === 'map' ? (
+        <PropertiesMapLoader
+          properties={mapProperties}
+          branches={mapBranches}
+          pendingCount={pendingCount ?? 0}
+        />
+      ) : (
+        <Card>
+          <CardHeader>
+            <div className="flex items-center justify-between">
+              <CardTitle>All properties</CardTitle>
+              <form className="flex gap-2">
+                <input type="hidden" name="view" value="list" />
+                <input
+                  type="search"
+                  name="q"
+                  defaultValue={q}
+                  placeholder="Search name…"
+                  className="h-9 rounded-md border border-input bg-background px-3 text-sm"
+                />
+              </form>
+            </div>
+          </CardHeader>
+          <CardContent className="p-0">
+            <Table>
+              <TableHeader>
                 <TableRow>
-                  <TableCell colSpan={6} className="py-8 text-center text-sm text-muted-foreground">
-                    No properties yet. Import an Aspire CSV above to get started.
-                  </TableCell>
+                  <TableHead>Name</TableHead>
+                  <TableHead>Address</TableHead>
+                  <TableHead>City</TableHead>
+                  <TableHead>Service</TableHead>
+                  <TableHead>Est hrs</TableHead>
+                  <TableHead>Geocoded</TableHead>
                 </TableRow>
+              </TableHeader>
+              <TableBody>
+                {properties.map((p) => (
+                  <TableRow key={p.id}>
+                    <TableCell className="font-medium">{p.name}</TableCell>
+                    <TableCell className="text-muted-foreground">{p.address}</TableCell>
+                    <TableCell>{p.city}</TableCell>
+                    <TableCell>
+                      <Badge variant="secondary">{p.service_type}</Badge>
+                    </TableCell>
+                    <TableCell>{p.est_labor_hours.toFixed(1)}</TableCell>
+                    <TableCell>
+                      {p.lat != null ? (
+                        <Badge variant="success">✓</Badge>
+                      ) : (
+                        <Badge variant="warning">pending</Badge>
+                      )}
+                    </TableCell>
+                  </TableRow>
+                ))}
+                {properties.length === 0 && (
+                  <TableRow>
+                    <TableCell colSpan={6} className="py-8 text-center text-sm text-muted-foreground">
+                      No properties yet. Import an Aspire CSV above to get started.
+                    </TableCell>
+                  </TableRow>
+                )}
+              </TableBody>
+            </Table>
+          </CardContent>
+          <div className="flex items-center justify-between border-t px-6 py-3 text-sm">
+            <span className="text-muted-foreground">
+              Page {page} of {totalPages}
+            </span>
+            <div className="flex gap-2">
+              {page > 1 && (
+                <a
+                  className="rounded-md border px-3 py-1"
+                  href={`/properties?page=${page - 1}${q ? `&q=${encodeURIComponent(q)}` : ''}`}
+                >
+                  Prev
+                </a>
               )}
-            </TableBody>
-          </Table>
-        </CardContent>
-        <div className="flex items-center justify-between border-t px-6 py-3 text-sm">
-          <span className="text-muted-foreground">
-            Page {page} of {totalPages}
-          </span>
-          <div className="flex gap-2">
-            {page > 1 && (
-              <a className="rounded-md border px-3 py-1" href={`/properties?page=${page - 1}${q ? `&q=${encodeURIComponent(q)}` : ''}`}>
-                Prev
-              </a>
-            )}
-            {page < totalPages && (
-              <a className="rounded-md border px-3 py-1" href={`/properties?page=${page + 1}${q ? `&q=${encodeURIComponent(q)}` : ''}`}>
-                Next
-              </a>
-            )}
+              {page < totalPages && (
+                <a
+                  className="rounded-md border px-3 py-1"
+                  href={`/properties?page=${page + 1}${q ? `&q=${encodeURIComponent(q)}` : ''}`}
+                >
+                  Next
+                </a>
+              )}
+            </div>
           </div>
-        </div>
-      </Card>
+        </Card>
+      )}
     </div>
   );
 }
