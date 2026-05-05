@@ -7,6 +7,9 @@ import type { OptimizationRun } from '@/lib/types';
 import { OptimizeForm } from './optimize-form';
 
 export const dynamic = 'force-dynamic';
+// Solver runs can take 60-90s; with waitUntil() the function must stay alive
+// at least that long after responding to the client.
+export const maxDuration = 300;
 
 function defaultPeakWeek(): string {
   // First Monday of June (peak summer for SLC landscape)

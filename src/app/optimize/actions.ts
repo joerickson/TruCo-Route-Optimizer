@@ -1,5 +1,6 @@
 'use server';
 import { revalidatePath } from 'next/cache';
+import { waitUntil } from '@vercel/functions';
 import { getServiceClient } from '@/lib/supabase';
 import type { Branch, Crew, Property } from '@/lib/types';
 
@@ -53,18 +54,25 @@ export async function startOptimization(formData: FormData) {
 
   if (runErr || !run) return { ok: false, error: runErr?.message ?? 'Could not create run' };
 
-  // Fire-and-forget call to Python solver. The solver POSTs back the result.
-  // We deliberately do not await — the Optimize UI polls /api/optimize/[runId]/status.
-  void invokeSolver(run.id, { crews, branches, properties }).catch(async (e) => {
-    await supabase
-      .from('optimization_runs')
-      .update({
-        status: 'failed',
-        failure_reason: e instanceof Error ? e.message : String(e),
-        completed_at: new Date().toISOString(),
-      })
-      .eq('id', run.id);
-  });
+  // Background call to Python solver. The solver writes the result back to
+  // optimization_runs directly; the run-detail page polls for completion.
+  //
+  // waitUntil keeps the function instance alive until the fetch settles even
+  // though we've already returned to the client. Without it, Vercel kills the
+  // instance the moment we return — the in-flight fetch gets terminated and
+  // the run sits in 'running' forever.
+  waitUntil(
+    invokeSolver(run.id, { crews, branches, properties }).catch(async (e) => {
+      await supabase
+        .from('optimization_runs')
+        .update({
+          status: 'failed',
+          failure_reason: e instanceof Error ? e.message : String(e),
+          completed_at: new Date().toISOString(),
+        })
+        .eq('id', run.id);
+    })
+  );
 
   revalidatePath('/optimize');
   return { ok: true, run_id: run.id };
