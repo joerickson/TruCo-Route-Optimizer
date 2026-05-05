@@ -1,47 +1,44 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
-import { Badge } from '@/components/ui/badge';
 import { getServerClient } from '@/lib/supabase';
 import type { Crew, Branch } from '@/lib/types';
+import { CrewRow } from './crew-row';
+import { AddCrewButton } from './add-crew-button';
 
 export const dynamic = 'force-dynamic';
-
-const DAYS: Array<[keyof Crew, string]> = [
-  ['works_monday', 'M'],
-  ['works_tuesday', 'T'],
-  ['works_wednesday', 'W'],
-  ['works_thursday', 'Th'],
-  ['works_friday', 'F'],
-  ['works_saturday', 'Sa'],
-  ['works_sunday', 'Su'],
-];
 
 export default async function CrewsPage() {
   const supabase = getServerClient();
   const [{ data: crewsData }, { data: branchesData }] = await Promise.all([
-    supabase.from('crews').select('*').eq('is_active', true).order('name'),
-    supabase.from('branches').select('*').eq('is_active', true).order('name'),
+    supabase.from('crews').select('*').order('name'),
+    supabase.from('branches').select('id, name, is_active').order('name'),
   ]);
 
   const crews = (crewsData ?? []) as Crew[];
-  const branches = (branchesData ?? []) as Branch[];
+  const branches = (branchesData ?? []) as Pick<Branch, 'id' | 'name' | 'is_active'>[];
   const branchById = Object.fromEntries(branches.map((b) => [b.id, b.name]));
+
+  const activeCount = crews.filter((c) => c.is_active).length;
+  const noActiveBranches = branches.filter((b) => b.is_active).length === 0;
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Crews</h1>
-        <p className="text-sm text-muted-foreground">
-          {crews.length} active crews · expected mix is 27 two-person + 3 three-person
-        </p>
+      <div className="flex flex-wrap items-end justify-between gap-3">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Crews</h1>
+          <p className="text-sm text-muted-foreground">
+            {activeCount} active · {crews.length} total · expected mix is 27 two-person + 3 three-person
+          </p>
+        </div>
+        <AddCrewButton branches={branches} />
       </div>
 
-      {crews.length === 0 && (
-        <Card>
+      {noActiveBranches && (
+        <Card className="border-amber-300 bg-amber-50">
           <CardHeader>
-            <CardTitle>No crews configured</CardTitle>
-            <CardDescription>
-              Run the seed migration to create the default 30-crew roster, or add crews manually.
+            <CardTitle className="text-amber-900">No active branches</CardTitle>
+            <CardDescription className="text-amber-900">
+              Crews must be assigned to a branch. Add one on the Branches page first.
             </CardDescription>
           </CardHeader>
         </Card>
@@ -49,8 +46,8 @@ export default async function CrewsPage() {
 
       <Card>
         <CardHeader>
-          <CardTitle>Active crews</CardTitle>
-          <CardDescription>Edit by clicking a row (coming next pass — for now these are managed via SQL/seed).</CardDescription>
+          <CardTitle>All crews</CardTitle>
+          <CardDescription>Click Edit on a row to change name, size, branch, working days, or max hours.</CardDescription>
         </CardHeader>
         <CardContent className="p-0">
           <Table>
@@ -61,26 +58,20 @@ export default async function CrewsPage() {
                 <TableHead>Branch</TableHead>
                 <TableHead>Working days</TableHead>
                 <TableHead>Hrs/day</TableHead>
+                <TableHead className="text-right w-44"></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
               {crews.map((c) => (
-                <TableRow key={c.id}>
-                  <TableCell className="font-medium">{c.name}</TableCell>
-                  <TableCell>
-                    <Badge variant={c.crew_size >= 3 ? 'default' : 'secondary'}>{c.crew_size}p</Badge>
-                  </TableCell>
-                  <TableCell>{branchById[c.home_branch_id] ?? '—'}</TableCell>
-                  <TableCell className="font-mono text-xs">
-                    {DAYS.map(([k, label]) => (
-                      <span key={k} className={c[k] ? 'mr-1 text-foreground' : 'mr-1 text-muted-foreground/40 line-through'}>
-                        {label}
-                      </span>
-                    ))}
-                  </TableCell>
-                  <TableCell>{Number(c.max_clock_hours_per_day).toFixed(1)}</TableCell>
-                </TableRow>
+                <CrewRow key={c.id} crew={c} branchName={branchById[c.home_branch_id] ?? '—'} branches={branches} />
               ))}
+              {crews.length === 0 && (
+                <TableRow>
+                  <TableCell colSpan={6} className="py-8 text-center text-sm text-muted-foreground">
+                    No crews yet. Add one above.
+                  </TableCell>
+                </TableRow>
+              )}
             </TableBody>
           </Table>
         </CardContent>
