@@ -1,13 +1,10 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Button } from '@/components/ui/button';
-import { Input } from '@/components/ui/input';
-import { Label } from '@/components/ui/label';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { Badge } from '@/components/ui/badge';
 import Link from 'next/link';
 import { getServerClient } from '@/lib/supabase';
 import type { OptimizationRun } from '@/lib/types';
-import { startOptimization } from './actions';
+import { OptimizeForm } from './optimize-form';
 
 export const dynamic = 'force-dynamic';
 
@@ -49,30 +46,7 @@ export default async function OptimizePage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <form action={startOptimization} className="grid gap-4 md:grid-cols-3">
-            <div className="md:col-span-2">
-              <Label htmlFor="name">Run name</Label>
-              <Input id="name" name="name" placeholder="Peak Summer Week 2026" />
-            </div>
-            <div>
-              <Label htmlFor="target_week_start_date">Week starting (Monday)</Label>
-              <Input
-                id="target_week_start_date"
-                name="target_week_start_date"
-                type="date"
-                defaultValue={defaultPeakWeek()}
-                required
-              />
-            </div>
-            <div className="md:col-span-3 flex items-center gap-3">
-              <Button type="submit" disabled={!ready}>Run optimizer</Button>
-              {!ready && (
-                <p className="text-sm text-muted-foreground">
-                  Need at least one branch, one crew, and one geocoded property to run.
-                </p>
-              )}
-            </div>
-          </form>
+          <OptimizeForm defaultWeek={defaultPeakWeek()} ready={ready} />
         </CardContent>
       </Card>
 
