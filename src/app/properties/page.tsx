@@ -192,7 +192,11 @@ export default async function PropertiesPage({
               <TableBody>
                 {properties.map((p) => (
                   <TableRow key={p.id}>
-                    <TableCell className="font-medium">{p.name}</TableCell>
+                    <TableCell className="font-medium">
+                      <Link href={`/properties/${p.id}`} className="hover:text-primary hover:underline">
+                        {p.name}
+                      </Link>
+                    </TableCell>
                     <TableCell className="text-muted-foreground">{p.address}</TableCell>
                     <TableCell>{p.city}</TableCell>
                     <TableCell>
