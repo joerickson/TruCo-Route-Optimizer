@@ -28,6 +28,7 @@ import os
 import sys
 import time
 import traceback
+from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from typing import Any
 
@@ -282,9 +283,13 @@ def _persist(run_id: str, result: dict[str, Any]) -> None:
     url = os.environ.get("NEXT_PUBLIC_SUPABASE_URL") or os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
     if not url or not key or create_client is None:
-        return
+        raise RuntimeError(
+            f"Cannot persist: url_set={bool(url)}, key_set={bool(key)}, supabase_lib={create_client is not None}"
+        )
     sb = create_client(url, key)
-    sb.table("optimization_runs").update(
+    # Postgres needs an ISO timestamp here. Sending the literal string "now()"
+    # was the silent-failure bug that left runs stuck on 'running'.
+    response = sb.table("optimization_runs").update(
         {
             "status": result["status"],
             "solver_runtime_seconds": result["solver_runtime_seconds"],
@@ -296,9 +301,11 @@ def _persist(run_id: str, result: dict[str, Any]) -> None:
             "capacity_recommendation": result["capacity_recommendation"],
             "recommendation_text": result["recommendation_text"],
             "routes_jsonb": result["routes_jsonb"],
-            "completed_at": "now()",
+            "completed_at": datetime.now(timezone.utc).isoformat(),
         }
     ).eq("id", run_id).execute()
+    if not getattr(response, "data", None):
+        raise RuntimeError(f"Update returned no rows for run_id={run_id}")
 
 
 class handler(BaseHTTPRequestHandler):
@@ -329,7 +336,11 @@ class handler(BaseHTTPRequestHandler):
                     if url and key and create_client is not None:
                         sb = create_client(url, key)
                         sb.table("optimization_runs").update(
-                            {"status": "failed", "failure_reason": str(e), "completed_at": "now()"}
+                            {
+                                "status": "failed",
+                                "failure_reason": str(e),
+                                "completed_at": datetime.now(timezone.utc).isoformat(),
+                            }
                         ).eq("id", run_id).execute()
                 except Exception:
                     pass
