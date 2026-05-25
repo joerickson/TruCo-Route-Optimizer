@@ -22,6 +22,7 @@ export interface CrewTimeline {
 
 export function parseClock(hhmm: string): number {
   const [h, m] = hhmm.split(':').map((n) => parseInt(n, 10));
+  if (Number.isNaN(h) || Number.isNaN(m)) throw new Error(`parseClock: invalid time "${hhmm}"`);
   return h * 3600 + m * 60;
 }
 
@@ -51,9 +52,9 @@ export function buildCrewTimeline(
   };
 }
 
-function frac(a: number, b: number, t: number): number {
-  if (b <= a) return 1;
-  return Math.min(1, Math.max(0, (t - a) / (b - a)));
+function frac(start: number, end: number, t: number): number {
+  if (end <= start) return 1;
+  return Math.min(1, Math.max(0, (t - start) / (end - start)));
 }
 
 function lerp(a: [number, number], b: [number, number], f: number): [number, number] {

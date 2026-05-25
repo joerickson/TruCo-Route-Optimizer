@@ -100,6 +100,33 @@ describe('positionAt', () => {
   });
 });
 
+describe('positionAt – two stops', () => {
+  const twoStop: CrewDayRoute = {
+    ...route,
+    end_time: '10:00',
+    stops: [
+      { ...route.stops[0] }, // arrives 07:30, service 30 min (ends 08:00)
+      {
+        property_id: 'p2',
+        property_name: 'Prop 2',
+        address: '456 St',
+        lat: 40.2,
+        lng: -111.0,
+        arrival_time: '08:30',
+        service_minutes: 30,
+        drive_minutes_to: 30,
+      },
+    ],
+  };
+
+  it('interpolates stop1 -> stop2 mid-drive (halfway at 08:15)', () => {
+    const tl = buildCrewTimeline(twoStop, depot);
+    const pos = positionAt(tl, parseClock('08:15'))!;
+    expect(pos[1]).toBeCloseTo(40.15, 6); // halfway lat between 40.1 and 40.2
+    expect(pos[0]).toBeCloseTo(-111.0, 6);
+  });
+});
+
 describe('dayClockRange', () => {
   it('spans min start to max end across timelines', () => {
     const a = buildCrewTimeline(route, depot);
