@@ -28,6 +28,8 @@ import os
 import sys
 import time
 import traceback
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from typing import Any
@@ -46,12 +48,6 @@ try:
 except Exception as e:
     solve_day = None  # type: ignore
     _IMPORT_ERRORS.append(f"solver_logic: {type(e).__name__}: {e}")
-
-try:
-    from supabase import create_client  # type: ignore
-except Exception as e:  # pragma: no cover
-    create_client = None  # type: ignore
-    _IMPORT_ERRORS.append(f"supabase: {type(e).__name__}: {e}")
 
 try:
     import ortools  # noqa: F401
@@ -224,7 +220,12 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
             unassigned.extend(p["id"] for p in props_for_day)
             continue
 
-        result = solve_day(day, props_for_day, crews_today, time_limit_seconds=25)
+        # Per-day OR-Tools time. GLS metaheuristic uses the FULL time budget
+        # even on tiny inputs, so this multiplies by # of non-empty days.
+        # Vercel's edge proxy kills connections with no first-byte-out within
+        # 60s, so total budget here must stay well under that. 5 days × 8s = 40s
+        # max for the solver, leaving ~20s headroom for cold start + persist.
+        result = solve_day(day, props_for_day, crews_today, time_limit_seconds=8)
         all_routes.extend(result["routes"])
         unassigned.extend(result.get("unassigned", []))
 
@@ -279,33 +280,54 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _persist(run_id: str, result: dict[str, Any]) -> None:
+def _supabase_patch(run_id: str, fields: dict[str, Any]) -> None:
+    """PATCH a single optimization_runs row via Supabase REST.
+
+    Uses urllib.request rather than the supabase-py library because supabase-py
+    2.10.0 rejects the new sb_secret_* service-role key format with "Invalid
+    API key". The REST API itself accepts the new key fine.
+    """
     url = os.environ.get("NEXT_PUBLIC_SUPABASE_URL") or os.environ.get("SUPABASE_URL")
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-    if not url or not key or create_client is None:
-        raise RuntimeError(
-            f"Cannot persist: url_set={bool(url)}, key_set={bool(key)}, supabase_lib={create_client is not None}"
-        )
-    sb = create_client(url, key)
+    if not url or not key:
+        raise RuntimeError(f"Missing supabase env: url_set={bool(url)}, key_set={bool(key)}")
+
+    req = urllib.request.Request(
+        f"{url}/rest/v1/optimization_runs?id=eq.{run_id}",
+        method="PATCH",
+        data=json.dumps(fields).encode("utf-8"),
+        headers={
+            "apikey": key,
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json",
+            "Prefer": "return=representation",
+        },
+    )
+    try:
+        resp_body = urllib.request.urlopen(req, timeout=10).read().decode()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Supabase PATCH {e.code}: {e.read().decode()[:300]}") from None
+    rows = json.loads(resp_body) if resp_body else []
+    if not rows:
+        raise RuntimeError(f"Update returned no rows for run_id={run_id}")
+
+
+def _persist(run_id: str, result: dict[str, Any]) -> None:
     # Postgres needs an ISO timestamp here. Sending the literal string "now()"
     # was the silent-failure bug that left runs stuck on 'running'.
-    response = sb.table("optimization_runs").update(
-        {
-            "status": result["status"],
-            "solver_runtime_seconds": result["solver_runtime_seconds"],
-            "total_clock_hours_per_week": result["total_clock_hours_per_week"],
-            "total_labor_hours_per_week": result["total_labor_hours_per_week"],
-            "total_drive_hours_per_week": result["total_drive_hours_per_week"],
-            "total_drive_miles_per_week": result["total_drive_miles_per_week"],
-            "crew_utilization": result["crew_utilization"],
-            "capacity_recommendation": result["capacity_recommendation"],
-            "recommendation_text": result["recommendation_text"],
-            "routes_jsonb": result["routes_jsonb"],
-            "completed_at": datetime.now(timezone.utc).isoformat(),
-        }
-    ).eq("id", run_id).execute()
-    if not getattr(response, "data", None):
-        raise RuntimeError(f"Update returned no rows for run_id={run_id}")
+    _supabase_patch(run_id, {
+        "status": result["status"],
+        "solver_runtime_seconds": result["solver_runtime_seconds"],
+        "total_clock_hours_per_week": result["total_clock_hours_per_week"],
+        "total_labor_hours_per_week": result["total_labor_hours_per_week"],
+        "total_drive_hours_per_week": result["total_drive_hours_per_week"],
+        "total_drive_miles_per_week": result["total_drive_miles_per_week"],
+        "crew_utilization": result["crew_utilization"],
+        "capacity_recommendation": result["capacity_recommendation"],
+        "recommendation_text": result["recommendation_text"],
+        "routes_jsonb": result["routes_jsonb"],
+        "completed_at": datetime.now(timezone.utc).isoformat(),
+    })
 
 
 class handler(BaseHTTPRequestHandler):
@@ -318,30 +340,24 @@ class handler(BaseHTTPRequestHandler):
             run_id = payload.get("run_id")
             result = run_optimization(payload)
             if run_id:
-                try:
-                    _persist(run_id, result)
-                except Exception as e:
-                    result["persist_error"] = str(e)
+                # Let _persist failures surface to the outer except so the run
+                # row gets marked 'failed'. Returning 200 with a swallowed
+                # persist_error left runs stuck on 'running' forever.
+                _persist(run_id, result)
 
             self.send_response(200)
             self.send_header("content-type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps(result).encode("utf-8"))
         except Exception as e:
-            err = {"status": "failed", "error": str(e)}
+            err = {"status": "failed", "error": str(e), "trace": traceback.format_exc()[-500:]}
             if run_id := (locals().get("run_id")):
                 try:
-                    url = os.environ.get("NEXT_PUBLIC_SUPABASE_URL") or os.environ.get("SUPABASE_URL")
-                    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
-                    if url and key and create_client is not None:
-                        sb = create_client(url, key)
-                        sb.table("optimization_runs").update(
-                            {
-                                "status": "failed",
-                                "failure_reason": str(e),
-                                "completed_at": datetime.now(timezone.utc).isoformat(),
-                            }
-                        ).eq("id", run_id).execute()
+                    _supabase_patch(run_id, {
+                        "status": "failed",
+                        "failure_reason": str(e)[:500],
+                        "completed_at": datetime.now(timezone.utc).isoformat(),
+                    })
                 except Exception:
                     pass
             self.send_response(500)
@@ -352,6 +368,7 @@ class handler(BaseHTTPRequestHandler):
     def do_GET(self):  # noqa: N802
         # Health check + diagnostic. Returns import status so we can debug
         # FUNCTION_INVOCATION_FAILED without trawling Vercel logs.
+        key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "")
         body = {
             "ok": len(_IMPORT_ERRORS) == 0,
             "service": "truco-optimizer",
@@ -359,7 +376,9 @@ class handler(BaseHTTPRequestHandler):
             "ortools_version": _ortools_version,
             "import_errors": _IMPORT_ERRORS,
             "supabase_url_set": bool(os.environ.get("NEXT_PUBLIC_SUPABASE_URL") or os.environ.get("SUPABASE_URL")),
-            "supabase_key_set": bool(os.environ.get("SUPABASE_SERVICE_ROLE_KEY")),
+            "supabase_key_set": bool(key),
+            "supabase_key_len": len(key),
+            "supabase_key_prefix": key[:8] if key else "",
         }
         self.send_response(200)
         self.send_header("content-type", "application/json")

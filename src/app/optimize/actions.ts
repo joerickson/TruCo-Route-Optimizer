@@ -1,6 +1,5 @@
 'use server';
 import { revalidatePath } from 'next/cache';
-import { waitUntil } from '@vercel/functions';
 import { getServiceClient } from '@/lib/supabase';
 import type { Branch, Crew, Property } from '@/lib/types';
 
@@ -57,22 +56,20 @@ export async function startOptimization(formData: FormData) {
   // Background call to Python solver. The solver writes the result back to
   // optimization_runs directly; the run-detail page polls for completion.
   //
-  // waitUntil keeps the function instance alive until the fetch settles even
-  // though we've already returned to the client. Without it, Vercel kills the
-  // instance the moment we return — the in-flight fetch gets terminated and
-  // the run sits in 'running' forever.
-  waitUntil(
-    invokeSolver(run.id, { crews, branches, properties }).catch(async (e) => {
-      await supabase
-        .from('optimization_runs')
-        .update({
-          status: 'failed',
-          failure_reason: e instanceof Error ? e.message : String(e),
-          completed_at: new Date().toISOString(),
-        })
-        .eq('id', run.id);
-    })
-  );
+  // Fire-and-forget: we don't await this. On Coolify the Node process is
+  // long-lived, so the in-flight fetch keeps running after we return to the
+  // client. (On Vercel this needed waitUntil() to stop the serverless instance
+  // being frozen the moment we returned — not a concern off Vercel.)
+  void invokeSolver(run.id, { crews, branches, properties }).catch(async (e) => {
+    await supabase
+      .from('optimization_runs')
+      .update({
+        status: 'failed',
+        failure_reason: e instanceof Error ? e.message : String(e),
+        completed_at: new Date().toISOString(),
+      })
+      .eq('id', run.id);
+  });
 
   revalidatePath('/optimize');
   return { ok: true, run_id: run.id };
@@ -82,9 +79,8 @@ async function invokeSolver(
   runId: string,
   payload: { crews: Crew[]; branches: Branch[]; properties: Property[] }
 ) {
-  // The Python solver runs in a separate Vercel project (Next.js + Python can't
-  // coexist in one project — Next.js claims /api/* at the routing layer). Set
-  // PYTHON_SOLVER_URL on this project to the full solver URL, e.g.
+  // The Python solver runs as a separate service. Set PYTHON_SOLVER_URL on this
+  // project to the full solver URL, e.g.
   //   https://truco-solver.vercel.app/api/solver
   if (!PYTHON_SOLVER_URL) {
     throw new Error(
