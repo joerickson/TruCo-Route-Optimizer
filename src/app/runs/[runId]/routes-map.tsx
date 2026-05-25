@@ -288,12 +288,14 @@ export default function RoutesMap(props: RoutesMapProps) {
         },
       });
 
+      const popup = new mapboxgl.Popup({ offset: 12 });
+
       // Stop popup.
       map.on('click', 'stop-points', (e) => {
         const f = e.features?.[0];
         if (!f || f.geometry.type !== 'Point') return;
         const p = f.properties as Record<string, string>;
-        new mapboxgl.Popup({ offset: 12 })
+        popup
           .setLngLat(f.geometry.coordinates as [number, number])
           .setHTML(`<div style="font-family:inherit;font-size:12px">Stop #${escapeHtml(p.seq ?? '')}</div>`)
           .addTo(map);
@@ -304,7 +306,7 @@ export default function RoutesMap(props: RoutesMapProps) {
         const f = e.features?.[0];
         if (!f || f.geometry.type !== 'Point') return;
         const p = f.properties as Record<string, string>;
-        new mapboxgl.Popup({ offset: 12 })
+        popup
           .setLngLat(f.geometry.coordinates as [number, number])
           .setHTML(
             `<div style="font-family:inherit;min-width:200px;line-height:1.45">
