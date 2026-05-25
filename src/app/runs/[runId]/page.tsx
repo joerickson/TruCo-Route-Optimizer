@@ -4,14 +4,24 @@ import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { getServerClient } from '@/lib/supabase';
-import type { OptimizationRun } from '@/lib/types';
+import type { OptimizationRun, CrewDayRoute } from '@/lib/types';
 import { dayName, formatHours, formatMiles } from '@/lib/utils';
 import { RunRefresher } from './refresher';
 import { ExportCsvButton } from './export-csv';
+import { RunViewToggle } from './run-view-toggle';
+import { RoutesMapLoader } from './routes-map-loader';
+import type { RoutesMapCrew, RoutesMapDepot, RoutesMapUnassigned } from './routes-map';
 
 export const dynamic = 'force-dynamic';
 
-export default async function RunPage({ params }: { params: { runId: string } }) {
+export default async function RunPage({
+  params,
+  searchParams,
+}: {
+  params: { runId: string };
+  searchParams: { view?: string };
+}) {
+  const view: 'list' | 'map' = searchParams.view === 'map' ? 'map' : 'list';
   const supabase = getServerClient();
   const { data, error } = await supabase
     .from('optimization_runs')
@@ -35,7 +45,10 @@ export default async function RunPage({ params }: { params: { runId: string } })
             Target week: {run.target_week_start_date} · created {new Date(run.created_at).toLocaleString()}
           </p>
         </div>
-        <RunStatusBadge status={run.status} />
+        <div className="flex items-center gap-3">
+          {run.status === 'completed' && <RunViewToggle runId={run.id} current={view} />}
+          <RunStatusBadge status={run.status} />
+        </div>
       </div>
 
       {run.status === 'failed' && (
@@ -58,8 +71,69 @@ export default async function RunPage({ params }: { params: { runId: string } })
         </Card>
       )}
 
-      {run.status === 'completed' && <CompletedRun run={run} />}
+      {run.status === 'completed' &&
+        (view === 'map' ? <RunMap run={run} /> : <CompletedRun run={run} />)}
     </div>
+  );
+}
+
+async function RunMap({ run }: { run: OptimizationRun }) {
+  const supabase = getServerClient();
+  const routes: CrewDayRoute[] = run.routes_jsonb?.per_day ?? [];
+  const days = Array.from(new Set(routes.map((r) => r.day_of_week))).sort((a, b) => a - b);
+
+  // Join depot coordinates for every branch referenced by a route.
+  const branchIds = Array.from(new Set(routes.map((r) => r.branch_id)));
+  const depotsById: Record<string, RoutesMapDepot> = {};
+  if (branchIds.length > 0) {
+    const { data: branchRows } = await supabase
+      .from('branches')
+      .select('id, name, lat, lng')
+      .in('id', branchIds);
+    for (const b of (branchRows ?? []) as Array<{ id: string; name: string; lat: number | string; lng: number | string }>) {
+      if (b.lat == null || b.lng == null) continue;
+      depotsById[b.id] = { id: b.id, name: b.name, lat: Number(b.lat), lng: Number(b.lng) };
+    }
+  }
+
+  // Assign each crew a stable, evenly-spread color.
+  const crewSeen = new Map<string, string>();
+  for (const r of routes) if (!crewSeen.has(r.crew_id)) crewSeen.set(r.crew_id, r.crew_name);
+  const sortedCrews = Array.from(crewSeen.entries()).sort((a, b) =>
+    a[1].localeCompare(b[1]) || a[0].localeCompare(b[0])
+  );
+  const n = Math.max(1, sortedCrews.length);
+  const crewColors: Record<string, string> = {};
+  const crewOrder: RoutesMapCrew[] = sortedCrews.map(([crewId, name], i) => {
+    const color = `hsl(${Math.round((i * 360) / n)}, 65%, 50%)`;
+    crewColors[crewId] = color;
+    return { crewId, name, color };
+  });
+
+  // Load unassigned properties (null on pre-migration runs -> empty).
+  const unassignedIds = run.unassigned_property_ids ?? [];
+  let unassigned: RoutesMapUnassigned[] = [];
+  if (unassignedIds.length > 0) {
+    const { data: propRows } = await supabase
+      .from('properties')
+      .select('id, name, address, lat, lng')
+      .in('id', unassignedIds)
+      .not('lat', 'is', null)
+      .not('lng', 'is', null);
+    unassigned = ((propRows ?? []) as Array<{ id: string; name: string; address: string; lat: number | string; lng: number | string }>).map(
+      (p) => ({ id: p.id, name: p.name, address: p.address, lat: Number(p.lat), lng: Number(p.lng) })
+    );
+  }
+
+  return (
+    <RoutesMapLoader
+      routes={routes}
+      depotsById={depotsById}
+      crewColors={crewColors}
+      crewOrder={crewOrder}
+      unassigned={unassigned}
+      days={days}
+    />
   );
 }
 
