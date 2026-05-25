@@ -326,6 +326,7 @@ def _persist(run_id: str, result: dict[str, Any]) -> None:
         "capacity_recommendation": result["capacity_recommendation"],
         "recommendation_text": result["recommendation_text"],
         "routes_jsonb": result["routes_jsonb"],
+        "unassigned_property_ids": result["unassigned_property_ids"],
         "completed_at": datetime.now(timezone.utc).isoformat(),
     })
 

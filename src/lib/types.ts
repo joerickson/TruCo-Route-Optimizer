@@ -126,6 +126,7 @@ export interface OptimizationRun {
   capacity_recommendation: CapacityRecommendation | null;
   recommendation_text: string | null;
   routes_jsonb: OptimizationRoutes | null;
+  unassigned_property_ids: string[] | null;
   failure_reason: string | null;
   started_at: string | null;
   completed_at: string | null;
