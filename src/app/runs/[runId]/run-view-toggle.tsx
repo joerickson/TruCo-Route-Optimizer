@@ -6,6 +6,7 @@ export function RunViewToggle({ runId, current }: { runId: string; current: 'lis
     <div className="inline-flex rounded-md border bg-background p-0.5 text-sm">
       <Link
         href={`/runs/${runId}?view=list`}
+        aria-current={current === 'list' ? 'page' : undefined}
         className={cn(
           'rounded px-3 py-1.5 transition-colors',
           current === 'list'
@@ -17,6 +18,7 @@ export function RunViewToggle({ runId, current }: { runId: string; current: 'lis
       </Link>
       <Link
         href={`/runs/${runId}?view=map`}
+        aria-current={current === 'map' ? 'page' : undefined}
         className={cn(
           'rounded px-3 py-1.5 transition-colors',
           current === 'map'

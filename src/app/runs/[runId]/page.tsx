@@ -84,17 +84,38 @@ async function RunMap({ run }: { run: OptimizationRun }) {
 
   // Join depot coordinates for every branch referenced by a route.
   const branchIds = Array.from(new Set(routes.map((r) => r.branch_id)));
+
+  // Load unassigned properties (null on pre-migration runs -> empty).
+  const unassignedIds = run.unassigned_property_ids ?? [];
+
+  const [branchResult, propResult] = await Promise.all([
+    branchIds.length > 0
+      ? supabase
+          .from('branches')
+          .select('id, name, lat, lng')
+          .in('id', branchIds)
+          .not('lat', 'is', null)
+          .not('lng', 'is', null)
+      : Promise.resolve({ data: [] as Array<{ id: string; name: string; lat: number | string; lng: number | string }> }),
+    unassignedIds.length > 0
+      ? supabase
+          .from('properties')
+          .select('id, name, address, lat, lng')
+          .in('id', unassignedIds)
+          .not('lat', 'is', null)
+          .not('lng', 'is', null)
+      : Promise.resolve({ data: [] as Array<{ id: string; name: string; address: string; lat: number | string; lng: number | string }> }),
+  ]);
+
   const depotsById: Record<string, RoutesMapDepot> = {};
-  if (branchIds.length > 0) {
-    const { data: branchRows } = await supabase
-      .from('branches')
-      .select('id, name, lat, lng')
-      .in('id', branchIds);
-    for (const b of (branchRows ?? []) as Array<{ id: string; name: string; lat: number | string; lng: number | string }>) {
-      if (b.lat == null || b.lng == null) continue;
-      depotsById[b.id] = { id: b.id, name: b.name, lat: Number(b.lat), lng: Number(b.lng) };
-    }
+  for (const b of (branchResult.data ?? []) as Array<{ id: string; name: string; lat: number | string; lng: number | string }>) {
+    if (b.lat == null || b.lng == null) continue;
+    depotsById[b.id] = { id: b.id, name: b.name, lat: Number(b.lat), lng: Number(b.lng) };
   }
+
+  const unassigned: RoutesMapUnassigned[] = ((propResult.data ?? []) as Array<{ id: string; name: string; address: string; lat: number | string; lng: number | string }>).map(
+    (p) => ({ id: p.id, name: p.name, address: p.address, lat: Number(p.lat), lng: Number(p.lng) })
+  );
 
   // Assign each crew a stable, evenly-spread color.
   const crewSeen = new Map<string, string>();
@@ -109,21 +130,6 @@ async function RunMap({ run }: { run: OptimizationRun }) {
     crewColors[crewId] = color;
     return { crewId, name, color };
   });
-
-  // Load unassigned properties (null on pre-migration runs -> empty).
-  const unassignedIds = run.unassigned_property_ids ?? [];
-  let unassigned: RoutesMapUnassigned[] = [];
-  if (unassignedIds.length > 0) {
-    const { data: propRows } = await supabase
-      .from('properties')
-      .select('id, name, address, lat, lng')
-      .in('id', unassignedIds)
-      .not('lat', 'is', null)
-      .not('lng', 'is', null);
-    unassigned = ((propRows ?? []) as Array<{ id: string; name: string; address: string; lat: number | string; lng: number | string }>).map(
-      (p) => ({ id: p.id, name: p.name, address: p.address, lat: Number(p.lat), lng: Number(p.lng) })
-    );
-  }
 
   return (
     <RoutesMapLoader
