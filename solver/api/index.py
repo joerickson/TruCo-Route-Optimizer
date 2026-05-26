@@ -460,6 +460,35 @@ def run_evaluation(payload: dict[str, Any]) -> dict[str, Any]:
     return _aggregate_result(crews, all_routes, unassigned, properties, time.time() - started)
 
 
+def _solve_days(
+    days: list[int],
+    buckets: dict[int, list[dict[str, Any]]],
+    crews: list[dict[str, Any]],
+    branches_by_id: dict[str, dict[str, Any]],
+) -> tuple[dict[int, list[dict[str, Any]]], dict[int, list[str]]]:
+    """Solve each given day independently. Returns ({day: routes}, {day: unassigned_chunk_ids}).
+
+    A day with chunks but no eligible crew marks all its chunks unassigned (matches
+    the prior per-day behavior)."""
+    routes_by_day: dict[int, list[dict[str, Any]]] = {}
+    unassigned_by_day: dict[int, list[str]] = {}
+    for day in days:
+        chunks = buckets.get(day, [])
+        if not chunks:
+            routes_by_day[day] = []
+            unassigned_by_day[day] = []
+            continue
+        crews_today = _crews_for_day(crews, branches_by_id, day)
+        if not crews_today:
+            routes_by_day[day] = []
+            unassigned_by_day[day] = [c["id"] for c in chunks]
+            continue
+        result = solve_day(day, chunks, crews_today, time_limit_seconds=8)
+        routes_by_day[day] = result["routes"]
+        unassigned_by_day[day] = result.get("unassigned", [])
+    return routes_by_day, unassigned_by_day
+
+
 def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
     started = time.time()
     crews = payload["crews"]
@@ -470,25 +499,52 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
     solver_props = _properties_for_solver(properties, crews)
     day_caps = _day_capacities(crews, branches_by_id)
     buckets = _bucketize_properties(solver_props, crews, day_caps)
+    work_days = sorted(buckets.keys())
+    chunk_by_id = {c["id"]: c for c in solver_props}
 
-    all_routes: list[dict[str, Any]] = []
-    unassigned: list[str] = []
+    # Initial solve of every day.
+    routes_by_day, unassigned_by_day = _solve_days(work_days, buckets, crews, branches_by_id)
 
-    for day, props_for_day in buckets.items():
-        if not props_for_day:
-            continue
-        crews_today = _crews_for_day(crews, branches_by_id, day)
-        if not crews_today:
-            unassigned.extend(p["id"] for p in props_for_day)
-            continue
-        # Per-day OR-Tools time. GLS metaheuristic uses the FULL time budget
-        # even on tiny inputs, so this multiplies by # of non-empty days.
-        # Vercel's edge proxy kills connections with no first-byte-out within
-        # 60s, so total budget must stay well under that (5 days × 8s = 40s).
-        result = solve_day(day, props_for_day, crews_today, time_limit_seconds=8)
-        all_routes.extend(result["routes"])
-        unassigned.extend(result.get("unassigned", []))
+    # Bounded cross-day rebalance: move still-unassigned chunks to days with spare
+    # capacity and re-solve only the changed days. A `tried` set prevents cycling;
+    # moves are monotonic (a day with spare won't evict its placed chunks), so this
+    # never lowers the assigned count vs the initial solve.
+    tried: dict[str, set[int]] = {}
+    for _round in range(_MAX_REBALANCE_ROUNDS):
+        if (time.time() - started) > _REBALANCE_TIME_CAP_SECONDS:
+            break
+        unassigned_ids = [cid for d in work_days for cid in unassigned_by_day[d]]
+        if not unassigned_ids:
+            break
+        spare = {
+            d: day_caps.get(d, 0.0) - _assigned_labor(buckets[d], set(unassigned_by_day[d]))
+            for d in work_days
+        }
+        dirty: set[int] = set()
+        for cid in sorted(unassigned_ids, key=lambda c: float(chunk_by_id[c]["labor_hours"]), reverse=True):
+            chunk = chunk_by_id[cid]
+            cur_day = _day_of(buckets, cid)
+            if cur_day is None:
+                continue
+            target = _pick_rebalance_day(
+                float(chunk["labor_hours"]), spare, work_days, cur_day, tried.get(cid, set())
+            )
+            if target is None:
+                continue
+            buckets[cur_day].remove(chunk)
+            buckets[target].append(chunk)
+            spare[target] -= float(chunk["labor_hours"])
+            tried.setdefault(cid, set()).add(target)
+            dirty.add(cur_day)
+            dirty.add(target)
+        if not dirty:
+            break
+        re_routes, re_unassigned = _solve_days(sorted(dirty), buckets, crews, branches_by_id)
+        routes_by_day.update(re_routes)
+        unassigned_by_day.update(re_unassigned)
 
+    all_routes = [r for d in work_days for r in routes_by_day[d]]
+    unassigned = [cid for d in work_days for cid in unassigned_by_day[d]]
     return _aggregate_result(crews, all_routes, unassigned, properties, time.time() - started)
 
 
