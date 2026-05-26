@@ -49,7 +49,7 @@ export default async function RunPage({
 
   const unassignedSummary =
     run.status === 'completed' ? await loadUnassignedSummary(supabase, run) : null;
-  const underUtilizedCrews = (run.crew_utilization ?? []).filter((c) => c.clock_hours < 40).length;
+  const underUtilizedCrews = (run.crew_utilization ?? []).filter((c) => c.clock_hours > 0 && c.clock_hours < 40).length;
 
   return (
     <div className="space-y-6">
@@ -86,11 +86,12 @@ export default async function RunPage({
         </Card>
       )}
 
-      {run.status === 'completed' && unassignedSummary && (
+      {run.status === 'completed' && unassignedSummary && unassignedSummary.count > 0 && (
         <UnassignedBanner
           count={unassignedSummary.count}
           totalUnplacedHours={unassignedSummary.totalUnplacedHours}
           underUtilizedCount={underUtilizedCrews}
+          currentView={view}
         />
       )}
 
@@ -346,7 +347,7 @@ function CompletedRun({ run, crewMeta, unassigned }: { run: OptimizationRun; cre
         />
       </div>
 
-      {unassigned && <UnassignedCard summary={unassigned} />}
+      {unassigned && unassigned.count > 0 && <UnassignedCard summary={unassigned} />}
 
       {run.recommendation_text && (
         <Card>

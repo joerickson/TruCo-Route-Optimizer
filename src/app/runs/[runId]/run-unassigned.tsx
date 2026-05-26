@@ -7,22 +7,24 @@ export function UnassignedBanner({
   count,
   totalUnplacedHours,
   underUtilizedCount,
+  currentView,
 }: {
   count: number;
   totalUnplacedHours: number;
   underUtilizedCount: number;
+  currentView: 'list' | 'map' | 'calendar';
 }) {
   return (
     <Card className="border-amber-300 bg-amber-50/50">
       <CardContent className="pt-4 text-sm text-amber-900">
-        <strong>{count}</strong> propert{count === 1 ? 'y' : 'ies'} (~{totalUnplacedHours.toFixed(0)}{' '}
+        <strong>{count}</strong> propert{count === 1 ? 'y' : 'ies'} (~{totalUnplacedHours.toFixed(1)}{' '}
         person-hours) not fully scheduled.
         {underUtilizedCount > 0
           ? ` ${underUtilizedCount} crew${underUtilizedCount === 1 ? '' : 's'} ${
               underUtilizedCount === 1 ? 'is' : 'are'
             } under 40 h/week, so this is likely a day-balancing or capacity gap — not a property problem.`
           : ' The fleet looks fully loaded — likely a true capacity shortfall (more crews needed).'}{' '}
-        See the Unassigned list in the List view.
+        {currentView === 'list' ? 'Details are listed below.' : 'See the Unassigned list in the List view.'}
       </CardContent>
     </Card>
   );
@@ -46,7 +48,7 @@ export function UnassignedCard({ summary }: { summary: UnassignedSummary }) {
               <TableHead>Property</TableHead>
               <TableHead>City</TableHead>
               <TableHead>Service</TableHead>
-              <TableHead className="text-right">Scheduled</TableHead>
+              <TableHead className="text-right">Coverage</TableHead>
             </TableRow>
           </TableHeader>
           <TableBody>
