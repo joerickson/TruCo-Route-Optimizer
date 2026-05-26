@@ -263,6 +263,7 @@ def _aggregate_result(
             "drive_miles": 0.0,
             "props_assigned": 0,
             "max_weekly": 0.0,
+            "_prop_ids": set(),
         }
         for c in crews
     }
@@ -277,7 +278,7 @@ def _aggregate_result(
         t["clock_hours"] += r["clock_hours"]
         t["drive_hours"] += r["drive_hours"]
         t["drive_miles"] += r["drive_miles"]
-        t["props_assigned"] += len(r["stops"])
+        t["_prop_ids"].update(s["property_id"] for s in r["stops"])
 
     crew_utilization = []
     for ct in crew_totals.values():
@@ -290,7 +291,7 @@ def _aggregate_result(
                 "drive_hours": round(ct["drive_hours"], 2),
                 "work_hours": round(ct["clock_hours"] - ct["drive_hours"], 2),
                 "drive_miles": round(ct["drive_miles"], 1),
-                "props_assigned": ct["props_assigned"],
+                "props_assigned": len(ct["_prop_ids"]),
                 "util_pct": round(util_pct, 1),
             }
         )
@@ -298,12 +299,16 @@ def _aggregate_result(
     total_clock = sum(c["clock_hours"] for c in crew_utilization)
     total_drive = sum(c["drive_hours"] for c in crew_utilization)
     total_miles = sum(c["drive_miles"] for c in crew_utilization)
-    # NB: raw properties (person-hours). Do NOT pass solver_props — it has est_clock_hours, not est_labor_hours.
+    # NB: raw properties (person-hours). Do NOT pass solver_props — those are chunks (labor_hours), not whole-property est_labor_hours.
     total_labor_persons = sum(float(p["est_labor_hours"]) for p in properties)
 
     n_active_crews = sum(1 for c in crew_utilization if c["clock_hours"] > 0)
     avg_clock_per_crew = total_clock / max(1, n_active_crews)
     rec_code, rec_text = _classify_capacity(avg_clock_per_crew)
+
+    # `unassigned` holds chunk ids ("propId" or "propId#k"); a property is unassigned
+    # if ANY of its chunks is. Map back to distinct property ids.
+    unassigned_property_ids = sorted({str(cid).rsplit("#", 1)[0] for cid in unassigned})
 
     return {
         "status": "completed",
@@ -316,7 +321,7 @@ def _aggregate_result(
         "capacity_recommendation": rec_code,
         "recommendation_text": rec_text,
         "routes_jsonb": {"per_day": all_routes},
-        "unassigned_property_ids": unassigned,
+        "unassigned_property_ids": unassigned_property_ids,
     }
 
 

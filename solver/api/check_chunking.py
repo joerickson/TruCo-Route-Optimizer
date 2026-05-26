@@ -91,3 +91,35 @@ split_days = [d for d, items in buckets.items() for c in items if c["property_id
 assert len(set(split_days)) > 1, f"split property should spread across days, got {split_days}"
 
 print("check_chunking: PASS (bucketize)")
+
+from index import _aggregate_result
+
+agg_crews = [
+    {"id": "c1", "name": "Crew 1", "crew_size": 3, "max_clock_hours_per_day": 10,
+     "works_monday": True, "works_tuesday": True, "works_wednesday": True,
+     "works_thursday": True, "works_friday": True},
+]
+
+def stop(pid):
+    return {"property_id": pid, "property_name": pid, "address": "x", "lat": 0, "lng": 0,
+            "arrival_time": "08:00", "service_minutes": 60, "drive_minutes_to": 5}
+
+routes = [{
+    "crew_id": "c1", "crew_name": "Crew 1", "day_of_week": 1, "branch_id": "b1",
+    "start_time": "07:00", "end_time": "15:00", "clock_hours": 9.0, "drive_hours": 1.0,
+    "drive_miles": 12.0, "stops": [stop("big"), stop("big"), stop("small")],
+}]
+unassigned_chunks = ["big#9", "huge"]
+properties = [
+    {"id": "big", "est_labor_hours": 35}, {"id": "small", "est_labor_hours": 8},
+    {"id": "huge", "est_labor_hours": 200},
+]
+res = _aggregate_result(agg_crews, routes, unassigned_chunks, properties, 1.0)
+
+util = res["crew_utilization"][0]
+assert util["props_assigned"] == 2, util["props_assigned"]
+assert sorted(res["unassigned_property_ids"]) == ["big", "huge"], res["unassigned_property_ids"]
+assert "_prop_ids" not in util
+
+print("check_chunking: PASS (aggregate)")
+print("check_chunking: ALL PASS")
