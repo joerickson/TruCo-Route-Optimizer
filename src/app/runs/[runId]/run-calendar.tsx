@@ -21,7 +21,13 @@ const BAND_CLASS: Record<CapacityBand, string> = {
   unsustainable: 'bg-red-100 text-red-800',
 };
 
-export function RunCalendar({ grid }: { grid: CalendarRow[] }) {
+export function RunCalendar({
+  grid,
+  crewMeta = {},
+}: {
+  grid: CalendarRow[];
+  crewMeta?: Record<string, string>;
+}) {
   if (grid.length === 0) {
     return (
       <Card>
@@ -64,6 +70,9 @@ export function RunCalendar({ grid }: { grid: CalendarRow[] }) {
                   <td className="p-2">
                     <div className="flex items-center gap-2">
                       <span className="font-medium">{row.crewName}</span>
+                      {crewMeta[row.crewId] && (
+                        <span className="text-xs font-normal text-muted-foreground">· {crewMeta[row.crewId]}</span>
+                      )}
                       {row.fullyIdle && <Badge variant="warning">idle all week</Badge>}
                     </div>
                   </td>

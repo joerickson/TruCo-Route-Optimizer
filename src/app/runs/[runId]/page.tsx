@@ -38,6 +38,13 @@ export default async function RunPage({
 
   const isPolling = run.status === 'pending' || run.status === 'running';
 
+  // Preformatted "Branch · Np" label per crew (home branch + crew size), shown
+  // inline next to crew names across the views. Empty string when unknown.
+  const crewMeta =
+    run.status === 'completed'
+      ? await loadCrewMeta(supabase, (run.crew_utilization ?? []).map((c) => c.crew_id))
+      : {};
+
   return (
     <div className="space-y-6">
       {isPolling && <RunRefresher />}
@@ -95,17 +102,56 @@ export default async function RunPage({
 
       {run.status === 'completed' &&
         (view === 'map' ? (
-          <RunMap run={run} />
+          <RunMap run={run} crewMeta={crewMeta} />
         ) : view === 'calendar' ? (
-          <RunCalendarView run={run} />
+          <RunCalendarView run={run} crewMeta={crewMeta} />
         ) : (
-          <CompletedRun run={run} />
+          <CompletedRun run={run} crewMeta={crewMeta} />
         ))}
     </div>
   );
 }
 
-async function RunMap({ run }: { run: OptimizationRun }) {
+// Build a "Branch · Np" label per crew from the crews + branches tables, keyed
+// by crew_id. The run row only stores crew_id/crew_name, so home branch and
+// crew size are joined here.
+async function loadCrewMeta(
+  supabase: ReturnType<typeof getServerClient>,
+  crewIds: string[]
+): Promise<Record<string, string>> {
+  if (crewIds.length === 0) return {};
+  const { data: crewRows } = await supabase
+    .from('crews')
+    .select('id, crew_size, home_branch_id')
+    .in('id', crewIds);
+  const crews = (crewRows ?? []) as Array<{
+    id: string;
+    crew_size: number | string | null;
+    home_branch_id: string | null;
+  }>;
+
+  const branchIds = Array.from(
+    new Set(crews.map((c) => c.home_branch_id).filter((b): b is string => !!b))
+  );
+  const branchName: Record<string, string> = {};
+  if (branchIds.length > 0) {
+    const { data: branchRows } = await supabase.from('branches').select('id, name').in('id', branchIds);
+    for (const b of (branchRows ?? []) as Array<{ id: string; name: string }>) branchName[b.id] = b.name;
+  }
+
+  const meta: Record<string, string> = {};
+  for (const c of crews) {
+    const parts: string[] = [];
+    const bn = c.home_branch_id ? branchName[c.home_branch_id] : undefined;
+    if (bn) parts.push(bn);
+    const size = Number(c.crew_size ?? 0);
+    if (size > 0) parts.push(`${size}p`);
+    meta[c.id] = parts.join(' · ');
+  }
+  return meta;
+}
+
+async function RunMap({ run, crewMeta }: { run: OptimizationRun; crewMeta: Record<string, string> }) {
   const supabase = getServerClient();
   const routes: CrewDayRoute[] = run.routes_jsonb?.per_day ?? [];
   const days = Array.from(new Set(routes.map((r) => r.day_of_week))).sort((a, b) => a - b);
@@ -156,7 +202,8 @@ async function RunMap({ run }: { run: OptimizationRun }) {
   const crewOrder: RoutesMapCrew[] = sortedCrews.map(([crewId, name], i) => {
     const color = `hsl(${Math.round((i * 360) / n)}, 65%, 50%)`;
     crewColors[crewId] = color;
-    return { crewId, name, color };
+    const meta = crewMeta[crewId];
+    return { crewId, name: meta ? `${name} · ${meta}` : name, color };
   });
 
   return (
@@ -171,7 +218,7 @@ async function RunMap({ run }: { run: OptimizationRun }) {
   );
 }
 
-async function RunCalendarView({ run }: { run: OptimizationRun }) {
+async function RunCalendarView({ run, crewMeta }: { run: OptimizationRun; crewMeta: Record<string, string> }) {
   const supabase = getServerClient();
   const routes: CrewDayRoute[] = run.routes_jsonb?.per_day ?? [];
   const crewUtil = run.crew_utilization ?? [];
@@ -208,7 +255,7 @@ async function RunCalendarView({ run }: { run: OptimizationRun }) {
   }
 
   const grid = buildCalendarGrid(routes, crewUtil, crewsById);
-  return <RunCalendar grid={grid} />;
+  return <RunCalendar grid={grid} crewMeta={crewMeta} />;
 }
 
 function RunStatusBadge({ status }: { status: string }) {
@@ -224,7 +271,7 @@ function RunStatusBadge({ status }: { status: string }) {
   }
 }
 
-function CompletedRun({ run }: { run: OptimizationRun }) {
+function CompletedRun({ run, crewMeta }: { run: OptimizationRun; crewMeta: Record<string, string> }) {
   const utilization = run.crew_utilization ?? [];
   const routes = run.routes_jsonb?.per_day ?? [];
   const days = Array.from(new Set(routes.map((r) => r.day_of_week))).sort((a, b) => a - b);
@@ -281,7 +328,12 @@ function CompletedRun({ run }: { run: OptimizationRun }) {
                       <Card key={`${r.crew_id}-${d}`}>
                         <CardHeader className="pb-2">
                           <div className="flex items-center justify-between">
-                            <CardTitle className="text-base">{r.crew_name}</CardTitle>
+                            <CardTitle className="text-base">
+                              {r.crew_name}
+                              {crewMeta[r.crew_id] && (
+                                <span className="font-normal text-muted-foreground"> · {crewMeta[r.crew_id]}</span>
+                              )}
+                            </CardTitle>
                             <div className="text-xs text-muted-foreground">
                               {r.stops.length} stops · {formatHours(r.clock_hours)} clock · {formatHours(r.drive_hours)} drive ·{' '}
                               {formatMiles(r.drive_miles)}
@@ -338,7 +390,12 @@ function CompletedRun({ run }: { run: OptimizationRun }) {
             <TableBody>
               {utilization.map((u) => (
                 <TableRow key={u.crew_id}>
-                  <TableCell className="font-medium">{u.crew_name}</TableCell>
+                  <TableCell className="font-medium">
+                    {u.crew_name}
+                    {crewMeta[u.crew_id] && (
+                      <span className="font-normal text-muted-foreground"> · {crewMeta[u.crew_id]}</span>
+                    )}
+                  </TableCell>
                   <TableCell className="text-right">{formatHours(u.clock_hours)}</TableCell>
                   <TableCell className="text-right">{formatHours(u.drive_hours)}</TableCell>
                   <TableCell className="text-right">{formatMiles(u.drive_miles)}</TableCell>
