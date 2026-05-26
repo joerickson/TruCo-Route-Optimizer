@@ -53,9 +53,11 @@ describe('matchesFilters', () => {
     const state: FilterState = { cities: null, services: { ...allServices }, contract: 'all' };
     expect(matchesFilters(base, state, today)).toBe(true);
   });
-  it('cities null or empty means all cities pass', () => {
+  it('cities null means all cities pass', () => {
     expect(matchesFilters(base, { cities: null, services: { ...allServices }, contract: 'all' }, today)).toBe(true);
-    expect(matchesFilters(base, { cities: [], services: { ...allServices }, contract: 'all' }, today)).toBe(true);
+  });
+  it('cities empty array matches no properties', () => {
+    expect(matchesFilters(base, { cities: [], services: { ...allServices }, contract: 'all' }, today)).toBe(false);
   });
   it('filters out a city not in the selection', () => {
     const state: FilterState = { cities: ['Lehi'], services: { ...allServices }, contract: 'all' };

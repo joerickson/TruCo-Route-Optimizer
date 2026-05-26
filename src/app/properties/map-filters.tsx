@@ -51,6 +51,7 @@ export function MapFilters({
         {CONTRACT_OPTIONS.map((o) => (
           <button
             key={o.value}
+            type="button"
             onClick={() => onContractChange(o.value)}
             className={cn(
               'rounded px-2.5 py-1 transition-colors',
@@ -109,14 +110,16 @@ function CityMultiSelect({
   const label = isAll ? 'All cities' : `${selected.length} ${selected.length === 1 ? 'city' : 'cities'}`;
 
   const toggleCity = (city: string) => {
-    const current = isAll ? allCities : selected;
-    const next = current.includes(city) ? current.filter((c) => c !== city) : [...current, city];
-    onChange(next.length === allCities.length ? null : next);
+    const currentSet = new Set(isAll ? allCities : selected.filter((c) => allCities.includes(c)));
+    if (currentSet.has(city)) currentSet.delete(city);
+    else currentSet.add(city);
+    onChange(currentSet.size === allCities.length ? null : [...currentSet]);
   };
 
   return (
     <div ref={ref} className="relative">
       <button
+        type="button"
         onClick={() => setOpen((o) => !o)}
         className="inline-flex items-center gap-1.5 rounded-md border px-3 py-1.5 text-sm hover:bg-accent"
       >
@@ -126,10 +129,10 @@ function CityMultiSelect({
       {open && (
         <div className="absolute z-50 mt-1 max-h-72 w-60 overflow-auto rounded-md border bg-background p-2 shadow-md">
           <div className="mb-2 flex gap-2 border-b pb-2">
-            <button onClick={() => onChange(null)} className="rounded border px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground">
+            <button type="button" onClick={() => onChange(null)} className="rounded border px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground">
               All
             </button>
-            <button onClick={() => onChange([])} className="rounded border px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground">
+            <button type="button" onClick={() => onChange([])} className="rounded border px-2 py-0.5 text-xs text-muted-foreground hover:text-foreground">
               None
             </button>
           </div>

@@ -5,7 +5,7 @@ export type ContractStatus = 'active' | 'inactive';
 export type ContractFilter = 'all' | 'active' | 'inactive';
 
 export interface FilterState {
-  cities: string[] | null; // null or [] => all cities
+  cities: string[] | null; // null => all cities; [] => none; otherwise explicit set
   services: Record<ServiceType, boolean>;
   contract: ContractFilter;
 }
@@ -47,7 +47,7 @@ interface FilterableProperty extends ContractDates {
 }
 
 export function matchesFilters(p: FilterableProperty, state: FilterState, today: Date): boolean {
-  if (state.cities && state.cities.length > 0 && !state.cities.includes(p.city)) return false;
+  if (state.cities !== null && !state.cities.includes(p.city)) return false;
   if (!state.services[p.service_type]) return false;
   if (state.contract !== 'all' && contractStatusOf(p, today) !== state.contract) return false;
   return true;
