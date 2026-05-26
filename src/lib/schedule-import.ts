@@ -112,5 +112,15 @@ export function parseScheduleFile(filename: string, buffer: ArrayBuffer): Schedu
     skipEmptyLines: true,
     transformHeader: (h) => h.trim(),
   });
-  return mapAll(parsed.data);
+  const result = mapAll(parsed.data);
+  parsed.errors.forEach((e) => {
+    result.skipped.push({
+      row_number: typeof e.row === 'number' ? e.row + 2 : -1,
+      property_name: null,
+      city: null,
+      reason: `CSV parse error: ${e.message}`,
+      raw: {},
+    });
+  });
+  return result;
 }

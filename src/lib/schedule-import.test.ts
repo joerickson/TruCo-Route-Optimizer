@@ -70,4 +70,11 @@ describe('parseScheduleFile (CSV)', () => {
     expect(skipped[1].reason).toMatch(/Crew/i);
     expect(skipped[2].reason).toMatch(/Day/i);
   });
+
+  it('captures Papa parse errors as skipped rows', () => {
+    // An unclosed quote causes PapaParse to emit errors in parsed.errors
+    const csv = 'External ID,Crew,Day\n"P-1,Crew A,Monday\n';
+    const { skipped } = parseScheduleFile('sched.csv', csvBuffer(csv));
+    expect(skipped.some((s) => /parse error/i.test(s.reason))).toBe(true);
+  });
 });
