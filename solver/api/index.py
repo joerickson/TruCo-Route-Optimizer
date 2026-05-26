@@ -151,6 +151,7 @@ def _properties_for_solver(props: list[dict[str, Any]], crew_size_default: int =
                 "est_clock_hours": clock,
                 "preferred_day_of_week": p.get("preferred_day_of_week"),
                 "assigned_day_of_week": p.get("assigned_day_of_week"),
+                "assigned_crew_id": p.get("assigned_crew_id"),
             }
         )
     return out
@@ -259,6 +260,27 @@ def _aggregate_result(
         "routes_jsonb": {"per_day": all_routes},
         "unassigned_property_ids": unassigned,
     }
+
+
+def _group_by_crew_day(
+    solver_props: list[dict[str, Any]],
+) -> tuple[dict[tuple[int, str], list[dict[str, Any]]], list[str]]:
+    """Group properties by their fixed (assigned_day_of_week, assigned_crew_id).
+
+    Returns (groups, unassigned_ids). A property with no crew or no day is
+    unassigned — it is part of today's schedule on paper but not actually
+    routed to anyone.
+    """
+    groups: dict[tuple[int, str], list[dict[str, Any]]] = {}
+    unassigned: list[str] = []
+    for p in solver_props:
+        day = p.get("assigned_day_of_week")
+        crew_id = p.get("assigned_crew_id")
+        if not day or not crew_id:
+            unassigned.append(p["id"])
+            continue
+        groups.setdefault((int(day), str(crew_id)), []).append(p)
+    return groups, unassigned
 
 
 def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
