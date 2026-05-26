@@ -239,6 +239,7 @@ def _aggregate_result(
     total_clock = sum(c["clock_hours"] for c in crew_utilization)
     total_drive = sum(c["drive_hours"] for c in crew_utilization)
     total_miles = sum(c["drive_miles"] for c in crew_utilization)
+    # NB: raw properties (person-hours). Do NOT pass solver_props — it has est_clock_hours, not est_labor_hours.
     total_labor_persons = sum(float(p["est_labor_hours"]) for p in properties)
 
     n_active_crews = sum(1 for c in crew_utilization if c["clock_hours"] > 0)
@@ -280,6 +281,10 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
         if not crews_today:
             unassigned.extend(p["id"] for p in props_for_day)
             continue
+        # Per-day OR-Tools time. GLS metaheuristic uses the FULL time budget
+        # even on tiny inputs, so this multiplies by # of non-empty days.
+        # Vercel's edge proxy kills connections with no first-byte-out within
+        # 60s, so total budget must stay well under that (5 days × 8s = 40s).
         result = solve_day(day, props_for_day, crews_today, time_limit_seconds=8)
         all_routes.extend(result["routes"])
         unassigned.extend(result.get("unassigned", []))
