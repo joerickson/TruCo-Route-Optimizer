@@ -2,28 +2,33 @@ import Link from 'next/link';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { getServerClient } from '@/lib/supabase';
 import { Button } from '@/components/ui/button';
+import { getPropertyMapData } from './properties/map-data';
+import { PropertiesMapLoader } from './properties/properties-map-loader';
 
 export const dynamic = 'force-dynamic';
 
 async function getCounts() {
   const supabase = getServerClient();
-  const [{ count: propCount }, { count: crewCount }, { count: branchCount }, { data: latestRun }] = await Promise.all([
-    supabase.from('properties').select('*', { count: 'exact', head: true }).eq('is_active', true),
-    supabase.from('crews').select('*', { count: 'exact', head: true }).eq('is_active', true),
-    supabase.from('branches').select('*', { count: 'exact', head: true }).eq('is_active', true),
-    supabase
-      .from('optimization_runs')
-      .select('id, name, status, created_at, capacity_recommendation')
-      .order('created_at', { ascending: false })
-      .limit(1)
-      .maybeSingle(),
-  ]);
+  const [{ count: propCount }, { count: crewCount }, { count: branchCount }, { data: latestRun }, mapData] =
+    await Promise.all([
+      supabase.from('properties').select('*', { count: 'exact', head: true }).eq('is_active', true),
+      supabase.from('crews').select('*', { count: 'exact', head: true }).eq('is_active', true),
+      supabase.from('branches').select('*', { count: 'exact', head: true }).eq('is_active', true),
+      supabase
+        .from('optimization_runs')
+        .select('id, name, status, created_at, capacity_recommendation')
+        .order('created_at', { ascending: false })
+        .limit(1)
+        .maybeSingle(),
+      getPropertyMapData(supabase),
+    ]);
 
   return {
     propCount: propCount ?? 0,
     crewCount: crewCount ?? 0,
     branchCount: branchCount ?? 0,
     latestRun,
+    mapData,
   };
 }
 
@@ -95,6 +100,16 @@ export default async function HomePage() {
           )}
         </CardContent>
       </Card>
+
+      {data && data.mapData.properties.length > 0 && (
+        <PropertiesMapLoader
+          properties={data.mapData.properties}
+          branches={data.mapData.branches}
+          pendingCount={data.mapData.pendingCount}
+          heightClass="h-[460px]"
+          fullMapHref="/properties?view=map"
+        />
+      )}
     </div>
   );
 }
