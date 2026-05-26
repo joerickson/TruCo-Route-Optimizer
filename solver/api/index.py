@@ -68,6 +68,66 @@ WEEKDAY_FIELDS = {
 }
 
 
+# Cross-day rebalance tunables.
+_DAY_CAPACITY_HEADROOM = 0.85  # leave ~15% of a day's labor capacity for drive time
+_MAX_REBALANCE_ROUNDS = 3
+_REBALANCE_TIME_CAP_SECONDS = 240
+
+
+def _day_capacities(
+    crews: list[dict[str, Any]], branches_by_id: dict[str, dict[str, Any]]
+) -> dict[int, float]:
+    """Usable person-hours each weekday (1..5) can absorb.
+
+    Sum (crew_size * max_clock_hours_per_day) over crews that work the day AND have
+    a geocoded home branch (same eligibility as _crews_for_day), scaled by a
+    headroom factor so a day isn't packed to 100% labor before drive time is added.
+    """
+    caps: dict[int, float] = {}
+    for d in (1, 2, 3, 4, 5):
+        field = WEEKDAY_FIELDS[d]
+        total = 0.0
+        for c in crews:
+            if not c.get(field):
+                continue
+            if not branches_by_id.get(c.get("home_branch_id")):
+                continue
+            total += int(c.get("crew_size") or 2) * float(c.get("max_clock_hours_per_day") or 8)
+        caps[d] = total * _DAY_CAPACITY_HEADROOM
+    return caps
+
+
+def _assigned_labor(day_chunks: list[dict[str, Any]], unassigned_ids: set[str]) -> float:
+    """Person-hours of a day's chunks that were actually placed (not unassigned)."""
+    return sum(float(c["labor_hours"]) for c in day_chunks if c["id"] not in unassigned_ids)
+
+
+def _pick_rebalance_day(
+    labor: float,
+    spare: dict[int, float],
+    work_days: list[int],
+    current_day: int,
+    tried_days: set[int],
+) -> int | None:
+    """The work-day with the most spare that fits `labor`, excluding the chunk's
+    current day and any day already tried for it. None if nothing qualifies."""
+    candidates = [
+        d for d in work_days
+        if d != current_day and d not in tried_days and spare.get(d, 0.0) >= labor
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda d: spare[d])
+
+
+def _day_of(buckets: dict[int, list[dict[str, Any]]], chunk_id: str) -> int | None:
+    """Which day's bucket currently holds the chunk (None if not found)."""
+    for d, chunks in buckets.items():
+        if any(c["id"] == chunk_id for c in chunks):
+            return d
+    return None
+
+
 def _bucketize_properties(
     properties: list[dict[str, Any]], crews: list[dict[str, Any]]
 ) -> dict[int, list[dict[str, Any]]]:

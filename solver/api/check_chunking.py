@@ -122,4 +122,37 @@ assert sorted(res["unassigned_property_ids"]) == ["big", "huge"], res["unassigne
 assert "_prop_ids" not in util
 
 print("check_chunking: PASS (aggregate)")
+from index import _day_capacities, _assigned_labor, _pick_rebalance_day, _day_of
+
+# --- _day_capacities ---
+cap_crews = [
+    {"crew_size": 2, "max_clock_hours_per_day": 10, "home_branch_id": "b1", "works_monday": True, "works_tuesday": True},
+    {"crew_size": 3, "max_clock_hours_per_day": 10, "home_branch_id": "b1", "works_monday": True},
+    {"crew_size": 3, "max_clock_hours_per_day": 10, "home_branch_id": "bX", "works_monday": True},  # branch not geocoded
+]
+caps = _day_capacities(cap_crews, {"b1": {"id": "b1", "lat": 40, "lng": -111}})
+# Monday: crew1 (2*10) + crew2 (3*10) = 50; crew3 excluded (branch bX missing). *0.85 = 42.5
+assert approx(caps[1], 42.5), caps[1]
+# Tuesday: only crew1 works = 2*10 = 20; *0.85 = 17.0
+assert approx(caps[2], 17.0), caps[2]
+assert caps[3] == 0.0 and caps[4] == 0.0 and caps[5] == 0.0, caps
+
+# --- _assigned_labor ---
+dc = [{"id": "a", "labor_hours": 10}, {"id": "b", "labor_hours": 5}, {"id": "c", "labor_hours": 3}]
+assert approx(_assigned_labor(dc, {"b"}), 13), "10 + 3, b excluded"
+assert approx(_assigned_labor(dc, set()), 18)
+
+# --- _pick_rebalance_day ---
+spare = {1: 5.0, 2: 30.0, 3: 12.0}
+assert _pick_rebalance_day(10, spare, [1, 2, 3], current_day=3, tried_days=set()) == 2  # most spare that fits, != 3
+assert _pick_rebalance_day(10, spare, [1, 2, 3], current_day=2, tried_days=set()) == 3  # 2 excluded (current), 1 too small
+assert _pick_rebalance_day(10, spare, [1, 2, 3], current_day=3, tried_days={2}) is None  # 2 tried, 1 too small
+assert _pick_rebalance_day(100, spare, [1, 2, 3], current_day=1, tried_days=set()) is None  # none fits
+
+# --- _day_of ---
+buckets_t = {1: [{"id": "x", "labor_hours": 4}], 2: [{"id": "y", "labor_hours": 4}]}
+assert _day_of(buckets_t, "y") == 2
+assert _day_of(buckets_t, "missing") is None
+
+print("check_chunking: PASS (rebalance helpers)")
 print("check_chunking: ALL PASS")
