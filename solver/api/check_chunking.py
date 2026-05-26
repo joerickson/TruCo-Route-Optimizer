@@ -70,3 +70,24 @@ assert approx(sum(c["labor_hours"] for c in big), 35)
 assert all(c["assigned_crew_id"] == "c1" and c["assigned_day_of_week"] == 2 for c in big)
 
 print("check_chunking: PASS (properties_for_solver)")
+
+from index import _bucketize_properties
+
+bucket_crews = [
+    {"crew_size": 2, "max_clock_hours_per_day": 10,
+     "works_monday": True, "works_tuesday": True, "works_wednesday": True,
+     "works_thursday": True, "works_friday": True},
+]
+sticky_chunk = {"id": "s", "property_id": "s", "labor_hours": 8, "lat": 40.0, "lng": -111.0,
+                "assigned_day_of_week": 2, "chunk_count": 1}
+split_chunks = [
+    {"id": f"b#{k}", "property_id": "b", "labor_hours": 10, "lat": 40.1, "lng": -111.1,
+     "assigned_day_of_week": 2, "chunk_count": 4}
+    for k in range(1, 5)
+]
+buckets = _bucketize_properties([sticky_chunk, *split_chunks], bucket_crews)
+assert any(c["id"] == "s" for c in buckets[2]), "single-chunk sticky to assigned day"
+split_days = [d for d, items in buckets.items() for c in items if c["property_id"] == "b"]
+assert len(set(split_days)) > 1, f"split property should spread across days, got {split_days}"
+
+print("check_chunking: PASS (bucketize)")

@@ -87,7 +87,9 @@ def _bucketize_properties(
     sticky: list[dict[str, Any]] = []
     free: list[dict[str, Any]] = []
     for p in properties:
-        if p.get("assigned_day_of_week") in work_days:
+        # Single-chunk properties honor their assigned day. Multi-chunk (split)
+        # properties must span days, so they go into the free pool to spread.
+        if p.get("chunk_count", 1) == 1 and p.get("assigned_day_of_week") in work_days:
             sticky.append(p)
         else:
             free.append(p)
@@ -95,14 +97,14 @@ def _bucketize_properties(
     for p in sticky:
         buckets[p["assigned_day_of_week"]].append(p)
 
-    # Sort free properties by lat (rough geographic banding) then balance by load.
+    # Sort free chunks by lat (rough geographic banding) then balance by labor-hours.
     free.sort(key=lambda p: (float(p["lat"] or 0), float(p["lng"] or 0)))
-    day_loads: dict[int, float] = {d: sum(float(x["est_clock_hours"]) for x in buckets[d]) for d in work_days}
+    day_loads: dict[int, float] = {d: sum(float(x["labor_hours"]) for x in buckets[d]) for d in work_days}
 
     for p in free:
         target = min(work_days, key=lambda d: day_loads[d])
         buckets[target].append(p)
-        day_loads[target] += float(p["est_clock_hours"])
+        day_loads[target] += float(p["labor_hours"])
 
     return buckets
 
