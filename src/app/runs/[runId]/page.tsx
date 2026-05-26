@@ -14,6 +14,8 @@ import { RoutesMapLoader } from './routes-map-loader';
 import { RunCalendar } from './run-calendar';
 import { buildCalendarGrid, type CrewAvailability } from '@/lib/calendar-grid';
 import type { RoutesMapCrew, RoutesMapDepot, RoutesMapUnassigned } from './routes-map';
+import { UnassignedBanner, UnassignedCard } from './run-unassigned';
+import { computePropertyCoverage, summarizeUnassigned, type UnassignedProp, type UnassignedSummary } from '@/lib/property-coverage';
 
 export const dynamic = 'force-dynamic';
 
@@ -44,6 +46,10 @@ export default async function RunPage({
     run.status === 'completed'
       ? await loadCrewMeta(supabase, (run.crew_utilization ?? []).map((c) => c.crew_id))
       : {};
+
+  const unassignedSummary =
+    run.status === 'completed' ? await loadUnassignedSummary(supabase, run) : null;
+  const underUtilizedCrews = (run.crew_utilization ?? []).filter((c) => c.clock_hours > 0 && c.clock_hours < 40).length;
 
   return (
     <div className="space-y-6">
@@ -80,6 +86,15 @@ export default async function RunPage({
         </Card>
       )}
 
+      {run.status === 'completed' && unassignedSummary && unassignedSummary.count > 0 && (
+        <UnassignedBanner
+          count={unassignedSummary.count}
+          totalUnplacedHours={unassignedSummary.totalUnplacedHours}
+          underUtilizedCount={underUtilizedCrews}
+          currentView={view}
+        />
+      )}
+
       {run.status === 'failed' && (
         <Card className="border-destructive/40">
           <CardHeader>
@@ -106,7 +121,7 @@ export default async function RunPage({
         ) : view === 'calendar' ? (
           <RunCalendarView run={run} crewMeta={crewMeta} />
         ) : (
-          <CompletedRun run={run} crewMeta={crewMeta} />
+          <CompletedRun run={run} crewMeta={crewMeta} unassigned={unassignedSummary} />
         ))}
     </div>
   );
@@ -149,6 +164,50 @@ async function loadCrewMeta(
     meta[c.id] = parts.join(' · ');
   }
   return meta;
+}
+
+// Reconcile the run's unassigned properties (any chunk unplaced) with how much of
+// each one's labor DID get scheduled. Coverage is recovered from route stops
+// (service_minutes/60 * crew_size) — no solver change needed.
+async function loadUnassignedSummary(
+  supabase: ReturnType<typeof getServerClient>,
+  run: OptimizationRun
+): Promise<UnassignedSummary | null> {
+  const unassignedIds = run.unassigned_property_ids ?? [];
+  if (unassignedIds.length === 0) return null;
+  const routes: CrewDayRoute[] = run.routes_jsonb?.per_day ?? [];
+
+  const crewIds = Array.from(new Set(routes.map((r) => r.crew_id)));
+  const crewSizeById: Record<string, number> = {};
+  if (crewIds.length > 0) {
+    const { data: crewRows } = await supabase.from('crews').select('id, crew_size').in('id', crewIds);
+    for (const c of (crewRows ?? []) as Array<{ id: string; crew_size: number | string | null }>) {
+      crewSizeById[c.id] = Number(c.crew_size ?? 2) || 2;
+    }
+  }
+
+  const { data: propRows } = await supabase
+    .from('properties')
+    .select('id, name, city, service_type, est_labor_hours')
+    .in('id', unassignedIds);
+  const props: UnassignedProp[] = (
+    (propRows ?? []) as Array<{
+      id: string;
+      name: string;
+      city: string | null;
+      service_type: string;
+      est_labor_hours: number | string | null;
+    }>
+  ).map((p) => ({
+    id: p.id,
+    name: p.name,
+    city: p.city ?? null,
+    service_type: p.service_type,
+    est_labor_hours: Number(p.est_labor_hours) || 0,
+  }));
+
+  const coverage = computePropertyCoverage(routes, crewSizeById);
+  return summarizeUnassigned(props, coverage);
 }
 
 async function RunMap({ run, crewMeta }: { run: OptimizationRun; crewMeta: Record<string, string> }) {
@@ -271,7 +330,7 @@ function RunStatusBadge({ status }: { status: string }) {
   }
 }
 
-function CompletedRun({ run, crewMeta }: { run: OptimizationRun; crewMeta: Record<string, string> }) {
+function CompletedRun({ run, crewMeta, unassigned }: { run: OptimizationRun; crewMeta: Record<string, string>; unassigned: UnassignedSummary | null }) {
   const utilization = run.crew_utilization ?? [];
   const routes = run.routes_jsonb?.per_day ?? [];
   const days = Array.from(new Set(routes.map((r) => r.day_of_week))).sort((a, b) => a - b);
@@ -287,6 +346,8 @@ function CompletedRun({ run, crewMeta }: { run: OptimizationRun; crewMeta: Recor
           value={run.solver_runtime_seconds != null ? `${run.solver_runtime_seconds.toFixed(0)} s` : '—'}
         />
       </div>
+
+      {unassigned && unassigned.count > 0 && <UnassignedCard summary={unassigned} />}
 
       {run.recommendation_text && (
         <Card>
