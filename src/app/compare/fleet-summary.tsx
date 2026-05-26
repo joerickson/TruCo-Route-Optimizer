@@ -1,5 +1,10 @@
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import type { ScheduleComparison } from '@/lib/schedule-compare';
+import { BAND_LABELS } from '@/lib/schedule-compare';
+
+function bandLabel(b: ScheduleComparison['capacity']['currentBand']): string {
+  return b ? BAND_LABELS[b] : '—';
+}
 
 function Stat({ label, current, optimized, delta, unit, lowerIsBetter = true }: {
   label: string; current: number; optimized: number; delta: number; unit: string; lowerIsBetter?: boolean;
@@ -10,13 +15,13 @@ function Stat({ label, current, optimized, delta, unit, lowerIsBetter = true }: 
       <CardHeader className="pb-2">
         <CardDescription>{label}</CardDescription>
         <CardTitle className="text-2xl">
-          {optimized.toFixed(0)}<span className="text-sm font-normal text-muted-foreground"> {unit}</span>
+          {optimized.toFixed(0)}{unit ? <span className="text-sm font-normal text-muted-foreground"> {unit}</span> : ''}
         </CardTitle>
       </CardHeader>
       <CardContent className="text-xs text-muted-foreground">
-        current {current.toFixed(0)} {unit} ·{' '}
+        current {current.toFixed(0)}{unit ? ` ${unit}` : ''} ·{' '}
         <span className={improved ? 'text-emerald-600' : delta === 0 ? '' : 'text-amber-700'}>
-          {delta > 0 ? '+' : ''}{delta.toFixed(0)} {unit}
+          {delta > 0 ? '+' : ''}{delta.toFixed(0)}{unit ? ` ${unit}` : ''}
         </span>
       </CardContent>
     </Card>
@@ -37,7 +42,7 @@ export function FleetSummary({ comparison }: { comparison: ScheduleComparison })
         <CardHeader>
           <CardTitle>Capacity verdict</CardTitle>
           <CardDescription>
-            current: {comparison.capacity.currentBand ?? '—'} · optimized: {comparison.capacity.optimizedBand ?? '—'}
+            current: {bandLabel(comparison.capacity.currentBand)} · optimized: {bandLabel(comparison.capacity.optimizedBand)}
           </CardDescription>
         </CardHeader>
         <CardContent><p className="text-sm">{comparison.capacity.verdict}</p></CardContent>

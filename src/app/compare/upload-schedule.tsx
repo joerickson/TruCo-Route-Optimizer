@@ -46,7 +46,9 @@ export function UploadSchedule({ defaultWeek }: { defaultWeek: string }) {
             <Input id="target_week_start_date" name="target_week_start_date" type="date" defaultValue={defaultWeek} required />
           </div>
           <div className="md:col-span-3 flex items-center gap-3">
+            <Label htmlFor="schedule_file" className="sr-only">Schedule file</Label>
             <input
+              id="schedule_file"
               type="file" name="file" required
               accept=".csv,.xlsx,.xls,.xlsm,text/csv,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
               className="block text-sm file:mr-3 file:rounded-md file:border-0 file:bg-secondary file:px-3 file:py-2 file:text-sm file:font-medium file:text-secondary-foreground hover:file:bg-secondary/80"

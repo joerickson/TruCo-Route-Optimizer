@@ -1,3 +1,4 @@
+import { Suspense } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { getServerClient } from '@/lib/supabase';
 import type { OptimizationRun } from '@/lib/types';
@@ -66,7 +67,9 @@ export default async function ComparePage({ searchParams }: { searchParams: { ba
         </Card>
       ) : (
         <>
-          <CompareSelectors baselines={baselines} optimized={optimized} baselineId={baselineId} optimizedId={optimizedId} />
+          <Suspense fallback={null}>
+            <CompareSelectors baselines={baselines} optimized={optimized} baselineId={baselineId} optimizedId={optimizedId} />
+          </Suspense>
 
           {weekMismatch && (
             <Card className="border-amber-300">

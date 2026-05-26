@@ -6,7 +6,7 @@ const OVERLOADED_HRS = 55; // current-side clock-hrs/wk above this = overloaded
 const UNDERUSED_HRS = 40;  // active crew below this = underused
 const DRIVE_SAVED_NOISE_FLOOR_HRS = 0.5; // suppress sub-30-min drive deltas in the verdict
 
-const BAND_LABELS: Record<CapacityRecommendation, string> = {
+export const BAND_LABELS: Record<CapacityRecommendation, string> = {
   over_provisioned: 'over-provisioned',
   sufficient: 'sufficient',
   tight_but_feasible: 'tight but feasible',
