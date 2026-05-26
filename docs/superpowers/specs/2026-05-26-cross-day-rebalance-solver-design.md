@@ -22,6 +22,16 @@ work now that big properties can split into chunks.
 - Joint multi-day VRP (vehicles = crew×weekday). Considered and rejected: a
   ~150-vehicle / ~600-node model risks worse routes than per-day solves within the
   time budget, and is a much bigger rewrite. Revisit only if B proves insufficient.
+- **Cross-day "same crew finishes all of a property's chunks" preference (deferred).**
+  Requested, but **not expressible in the per-day decomposition**: crew assignment
+  happens inside each independent day-solve, and no soft constraint spans separate
+  solves. Within a day, the cost model already favors one crew doing a property's
+  co-located chunks (splitting them makes a second crew drive to the same spot — pure
+  extra cost), so the same-day case is effectively handled. Honoring it **across
+  days** requires the joint multi-day model (C), where `AddSoftSameVehicleConstraint`
+  over a property's chunk nodes would express it. Decision (2026-05-26): ship this
+  per-day rebalance for completeness now; revisit C for cross-day same-crew after
+  seeing how much it matters on real runs.
 - Changing `solve_day`, `_extract_routes`, `_aggregate_result`, `_properties_for_solver`,
   or `run_evaluation`. Rebalance is **optimize-mode only**; baseline/evaluate scoring
   keeps its fixed-assignment behavior untouched.
