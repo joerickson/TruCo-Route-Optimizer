@@ -10,6 +10,7 @@ const NAV = [
   { href: '/branches', label: 'Branches' },
   { href: '/optimize', label: 'Optimize' },
   { href: '/capacity', label: 'Capacity' },
+  { href: '/compare', label: 'Compare' },
 ];
 
 export function TopNav() {
