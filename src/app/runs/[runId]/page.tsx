@@ -1,3 +1,4 @@
+import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs';
@@ -43,7 +44,10 @@ export default async function RunPage({
 
       <div className="flex items-end justify-between">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight">{run.name}</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="text-2xl font-bold tracking-tight">{run.name}</h1>
+            {run.run_kind === 'baseline' && <Badge variant="secondary">baseline</Badge>}
+          </div>
           <p className="text-sm text-muted-foreground">
             Target week: {run.target_week_start_date} · created {new Date(run.created_at).toLocaleString()}
           </p>
@@ -53,6 +57,21 @@ export default async function RunPage({
           <RunStatusBadge status={run.status} />
         </div>
       </div>
+
+      {run.run_kind === 'baseline' && run.status === 'completed' && (
+        <Card className="border-secondary">
+          <CardHeader className="py-3">
+            <CardDescription>
+              This is a <strong>scored current schedule</strong> (your existing crew assignments run
+              through the solver), not an optimization. Compare it against an optimized run on the{' '}
+              <Link href="/compare" className="text-primary underline-offset-2 hover:underline">
+                Compare page
+              </Link>
+              .
+            </CardDescription>
+          </CardHeader>
+        </Card>
+      )}
 
       {run.status === 'failed' && (
         <Card className="border-destructive/40">

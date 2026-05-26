@@ -111,6 +111,9 @@ export interface OptimizationRoutes {
 export interface OptimizationRun {
   id: string;
   name: string;
+  // 'optimized' = a solver optimization; 'baseline' = a scored current (unoptimized)
+  // schedule, produced by the solver's evaluate mode. Both share this table.
+  run_kind: 'optimized' | 'baseline';
   target_week_start_date: string;
   active_branch_ids: string[] | null;
   active_crew_ids: string[] | null;
