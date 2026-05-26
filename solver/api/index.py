@@ -283,6 +283,50 @@ def _group_by_crew_day(
     return groups, unassigned
 
 
+# Sentinel max-clock for evaluate mode: never drop a stop for capacity, so an
+# overloaded crew is scored at its true hours instead of shedding work.
+_EVAL_MAX_CLOCK_HOURS = 1_000_000.0
+
+
+def run_evaluation(payload: dict[str, Any]) -> dict[str, Any]:
+    """Score a FIXED current schedule (properties carry assigned_crew_id +
+    assigned_day_of_week). Each crew-day is TSP-ordered with capacity relaxed;
+    aggregation is identical to run_optimization."""
+    started = time.time()
+    crews = payload["crews"]
+    branches = payload["branches"]
+    properties = payload["properties"]
+
+    branches_by_id = {b["id"]: b for b in branches}
+    crews_by_id = {c["id"]: c for c in crews}
+    solver_props = _properties_for_solver(properties)
+    groups, unassigned = _group_by_crew_day(solver_props)
+
+    all_routes: list[dict[str, Any]] = []
+
+    for (day, crew_id), props_for_group in groups.items():
+        crew = crews_by_id.get(crew_id)
+        branch = branches_by_id.get(crew["home_branch_id"]) if crew else None
+        if crew is None or branch is None:
+            # Assigned to a crew we don't have (deleted / no geocoded branch).
+            unassigned.extend(p["id"] for p in props_for_group)
+            continue
+        crew_for_day = [{
+            "id": crew["id"],
+            "name": crew["name"],
+            "branch_id": branch["id"],
+            "branch_lat": branch["lat"],
+            "branch_lng": branch["lng"],
+            "max_clock_hours": _EVAL_MAX_CLOCK_HOURS,  # relaxed: never drop
+            "crew_size": int(crew.get("crew_size") or 2),
+        }]
+        result = solve_day(day, props_for_group, crew_for_day, time_limit_seconds=8)
+        all_routes.extend(result["routes"])
+        unassigned.extend(result.get("unassigned", []))
+
+    return _aggregate_result(crews, all_routes, unassigned, properties, time.time() - started)
+
+
 def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
     started = time.time()
     crews = payload["crews"]
@@ -373,7 +417,8 @@ class handler(BaseHTTPRequestHandler):
             payload = json.loads(body)
 
             run_id = payload.get("run_id")
-            result = run_optimization(payload)
+            mode = payload.get("mode", "optimize")
+            result = run_evaluation(payload) if mode == "evaluate" else run_optimization(payload)
             if run_id:
                 # Let _persist failures surface to the outer except so the run
                 # row gets marked 'failed'. Returning 200 with a swallowed
