@@ -7,7 +7,7 @@ import { ImportForm } from './import-form';
 import { ViewToggle } from './view-toggle';
 import { PropertiesMapLoader } from './properties-map-loader';
 import type { Property } from '@/lib/types';
-import type { MapBranch, MapProperty } from './properties-map';
+import { getPropertyMapData } from './map-data';
 
 export const dynamic = 'force-dynamic';
 // Imports can run long on large re-uploads; raise from the default to give
@@ -35,32 +35,6 @@ export default async function PropertiesPage({
     .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
   if (q) listQuery = listQuery.ilike('name', `%${q}%`);
 
-  // Map query (all geocoded, slim columns) — only fired when needed.
-  const mapPropsP =
-    view === 'map'
-      ? (() => {
-          let mq = supabase
-            .from('properties')
-            .select('id, name, address, city, lat, lng, service_type, est_labor_hours, contract_start_date, contract_end_date')
-            .eq('is_active', true)
-            .not('lat', 'is', null)
-            .not('lng', 'is', null)
-            .limit(2000);
-          if (q) mq = mq.ilike('name', `%${q}%`);
-          return mq;
-        })()
-      : Promise.resolve({ data: null as null });
-
-  const branchesP =
-    view === 'map'
-      ? supabase.from('branches').select('id, name, address, city, lat, lng').eq('is_active', true)
-      : Promise.resolve({ data: null as null });
-
-  const pendingCountP =
-    view === 'map'
-      ? supabase.from('properties').select('*', { count: 'exact', head: true }).eq('is_active', true).is('lat', null)
-      : Promise.resolve({ count: 0 });
-
   const lastImportP = supabase
     .from('import_runs')
     .select('id, filename, inserted_count, updated_count, skipped_count, created_at')
@@ -68,48 +42,21 @@ export default async function PropertiesPage({
     .limit(1)
     .maybeSingle();
 
-  const [
-    { data, count, error },
-    { data: lastImport },
-    { data: mapPropsData },
-    { data: branchesData },
-    { count: pendingCount },
-  ] = await Promise.all([listQuery, lastImportP, mapPropsP, branchesP, pendingCountP]);
+  const [{ data, count, error }, { data: lastImport }, mapData] = await Promise.all([
+    listQuery,
+    lastImportP,
+    view === 'map'
+      ? getPropertyMapData(supabase, { q })
+      : Promise.resolve({ properties: [], branches: [], pendingCount: 0 }),
+  ]);
 
   const properties = (data ?? []) as Property[];
   const totalPages = Math.max(1, Math.ceil((count ?? 0) / PAGE_SIZE));
   const ungeocoded = properties.filter((p) => p.lat == null).length;
 
-  const mapProperties: MapProperty[] = ((mapPropsData ?? []) as Property[])
-    .filter((p): p is Property & { lat: number; lng: number } => p.lat != null && p.lng != null)
-    .map((p) => ({
-      id: p.id,
-      name: p.name,
-      address: p.address,
-      city: p.city,
-      lat: Number(p.lat),
-      lng: Number(p.lng),
-      service_type: p.service_type,
-      est_labor_hours: Number(p.est_labor_hours),
-      contract_start_date: p.contract_start_date,
-      contract_end_date: p.contract_end_date,
-    }));
-
-  const mapBranches: MapBranch[] = ((branchesData ?? []) as Array<{
-    id: string;
-    name: string;
-    address: string;
-    city: string;
-    lat: number | string;
-    lng: number | string;
-  }>).map((b) => ({
-    id: b.id,
-    name: b.name,
-    address: b.address,
-    city: b.city,
-    lat: Number(b.lat),
-    lng: Number(b.lng),
-  }));
+  const mapProperties = mapData.properties;
+  const mapBranches = mapData.branches;
+  const pendingCount = mapData.pendingCount;
 
   return (
     <div className="space-y-6">

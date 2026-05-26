@@ -3,9 +3,10 @@ import 'mapbox-gl/dist/mapbox-gl.css';
 import mapboxgl from 'mapbox-gl';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
-import { Switch } from '@/components/ui/switch';
-import { Label } from '@/components/ui/label';
 import type { ServiceType } from '@/lib/types';
+import { cn } from '@/lib/utils';
+import { MapFilters, SERVICE_COLORS, SERVICE_LABELS } from './map-filters';
+import { distinctCities, matchesFilters, type ContractFilter } from '@/lib/property-filters';
 
 export interface MapProperty {
   id: string;
@@ -29,40 +30,41 @@ export interface MapBranch {
   lng: number;
 }
 
-const SERVICE_COLORS: Record<ServiceType, string> = {
-  weekly: '#10b981', // emerald-500
-  biweekly: '#f59e0b', // amber-500
-  monthly: '#3b82f6', // blue-500
-};
-
-const SERVICE_LABELS: Record<ServiceType, string> = {
-  weekly: 'Weekly MT',
-  biweekly: 'Bi-Weekly',
-  monthly: 'Monthly MT',
-};
-
 const BRANCH_COLOR = '#ef4444'; // red-500
 
 export interface PropertiesMapProps {
   properties: MapProperty[];
   branches: MapBranch[];
   pendingCount: number;
+  heightClass?: string;
+  fullMapHref?: string;
 }
 
-export default function PropertiesMap({ properties, branches, pendingCount }: PropertiesMapProps) {
+export default function PropertiesMap({
+  properties,
+  branches,
+  pendingCount,
+  heightClass = 'h-[640px]',
+  fullMapHref,
+}: PropertiesMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
   const [styleReady, setStyleReady] = useState(false);
 
-  const [filters, setFilters] = useState<Record<ServiceType, boolean>>({
+  const [services, setServices] = useState<Record<ServiceType, boolean>>({
     weekly: true,
     biweekly: true,
     monthly: true,
   });
+  const [selectedCities, setSelectedCities] = useState<string[] | null>(null);
+  const [contract, setContract] = useState<ContractFilter>('all');
+
+  const today = useMemo(() => new Date(), []);
+  const cityOptions = useMemo(() => distinctCities(properties), [properties]);
 
   const filtered = useMemo(
-    () => properties.filter((p) => filters[p.service_type]),
-    [properties, filters]
+    () => properties.filter((p) => matchesFilters(p, { cities: selectedCities, services, contract }, today)),
+    [properties, selectedCities, services, contract, today]
   );
 
   const stats = useMemo(() => computeStats(filtered), [filtered]);
@@ -260,22 +262,25 @@ export default function PropertiesMap({ properties, branches, pendingCount }: Pr
                 </span>
               )}
             </CardDescription>
+            {fullMapHref && (
+              <a href={fullMapHref} className="text-xs font-medium text-primary hover:underline">
+                View all in Properties →
+              </a>
+            )}
           </div>
-          <div className="flex flex-wrap items-center gap-4">
-            {(['weekly', 'biweekly', 'monthly'] as ServiceType[]).map((st) => (
-              <ServiceToggle
-                key={st}
-                color={SERVICE_COLORS[st]}
-                label={SERVICE_LABELS[st]}
-                checked={filters[st]}
-                onChange={(v) => setFilters((prev) => ({ ...prev, [st]: v }))}
-              />
-            ))}
-          </div>
+          <MapFilters
+            services={services}
+            onServiceChange={(st, v) => setServices((prev) => ({ ...prev, [st]: v }))}
+            cityOptions={cityOptions}
+            selectedCities={selectedCities}
+            onCitiesChange={setSelectedCities}
+            contract={contract}
+            onContractChange={setContract}
+          />
         </div>
       </CardHeader>
       <CardContent className="space-y-4">
-        <div ref={containerRef} className="h-[640px] w-full overflow-hidden rounded-md border" />
+        <div ref={containerRef} className={cn(heightClass, 'w-full overflow-hidden rounded-md border')} />
         <StatsPanel stats={stats} />
         <div className="flex items-center gap-4 text-xs text-muted-foreground">
           <Legend color={SERVICE_COLORS.weekly} label="Weekly" />
@@ -285,29 +290,6 @@ export default function PropertiesMap({ properties, branches, pendingCount }: Pr
         </div>
       </CardContent>
     </Card>
-  );
-}
-
-function ServiceToggle({
-  color,
-  label,
-  checked,
-  onChange,
-}: {
-  color: string;
-  label: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  const id = `svc-${label.replace(/\s/g, '-').toLowerCase()}`;
-  return (
-    <div className="flex items-center gap-2">
-      <Switch id={id} checked={checked} onCheckedChange={onChange} />
-      <Label htmlFor={id} className="flex cursor-pointer items-center gap-1.5">
-        <span className="inline-block h-3 w-3 rounded-full" style={{ background: color }} />
-        {label}
-      </Label>
-    </div>
   );
 }
 
