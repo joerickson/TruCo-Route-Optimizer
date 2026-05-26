@@ -283,8 +283,11 @@ def _group_by_crew_day(
     return groups, unassigned
 
 
-# Sentinel max-clock for evaluate mode: never drop a stop for capacity, so an
-# overloaded crew is scored at its true hours instead of shedding work.
+# Sentinel max-clock for evaluate mode: removes capacity as a reason to drop a
+# stop, so an overloaded crew is scored at its true hours instead of shedding
+# work. (A stop can still land in `unassigned` if it's genuinely infeasible to
+# route — solve_day keeps a finite drop penalty — but that won't happen for the
+# geocoded, single-crew groups evaluate mode builds.)
 _EVAL_MAX_CLOCK_HOURS = 1_000_000.0
 
 
@@ -317,7 +320,7 @@ def run_evaluation(payload: dict[str, Any]) -> dict[str, Any]:
             "branch_id": branch["id"],
             "branch_lat": branch["lat"],
             "branch_lng": branch["lng"],
-            "max_clock_hours": _EVAL_MAX_CLOCK_HOURS,  # relaxed: never drop
+            "max_clock_hours": _EVAL_MAX_CLOCK_HOURS,  # relaxed: no capacity-based drops
             "crew_size": int(crew.get("crew_size") or 2),
         }]
         result = solve_day(day, props_for_group, crew_for_day, time_limit_seconds=8)
