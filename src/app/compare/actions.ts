@@ -54,7 +54,11 @@ export async function uploadAndScoreSchedule(formData: FormData): Promise<Schedu
       buckets.set(key, bucket);
     }
 
+    // NB: each bucket UPDATE auto-commits independently. If a later bucket throws,
+    // earlier assignments persist but no run row is created yet — acceptable for an
+    // internal re-import (re-running the upload is idempotent per (crew, day)).
     let applied = 0;
+    let unmatched = 0;
     for (const { crewId, day, externalIds } of buckets.values()) {
       const { data: updated, error } = await supabase
         .from('properties')
@@ -62,7 +66,9 @@ export async function uploadAndScoreSchedule(formData: FormData): Promise<Schedu
         .in('external_id', externalIds)
         .select('id');
       if (error) throw new Error(error.message);
-      applied += (updated ?? []).length; // counts only external_ids that matched a property
+      const matched = (updated ?? []).length;
+      applied += matched;
+      unmatched += externalIds.length - matched; // resolved rows whose External ID matched no property
     }
 
     if (applied === 0) {
@@ -88,7 +94,7 @@ export async function uploadAndScoreSchedule(formData: FormData): Promise<Schedu
         active_branch_ids: branches.map((b) => b.id),
         active_crew_ids: crews.map((c) => c.id),
         active_property_ids: properties.map((p) => p.id),
-        config_snapshot: { kind: 'baseline', applied, skipped: unresolved },
+        config_snapshot: { kind: 'baseline', applied, unresolved, unmatched },
         status: 'running',
         started_at: new Date().toISOString(),
       })
@@ -105,7 +111,7 @@ export async function uploadAndScoreSchedule(formData: FormData): Promise<Schedu
     });
 
     revalidatePath('/compare');
-    return { ok: true, run_id: run.id, applied, skipped: unresolved };
+    return { ok: true, run_id: run.id, applied, skipped: unresolved + unmatched };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
@@ -113,12 +119,14 @@ export async function uploadAndScoreSchedule(formData: FormData): Promise<Schedu
 
 async function invokeEvaluate(runId: string, payload: { crews: Crew[]; branches: Branch[]; properties: Property[] }) {
   if (!PYTHON_SOLVER_URL) {
-    throw new Error('PYTHON_SOLVER_URL is not configured.');
+    throw new Error(
+      'PYTHON_SOLVER_URL is not configured. Set it on this project to the deployed Python solver URL (e.g. https://truco-solver.vercel.app/api/solver).'
+    );
   }
   const res = await fetch(PYTHON_SOLVER_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ run_id: runId, mode: 'evaluate', ...payload }),
+    body: JSON.stringify({ run_id: runId, ...payload, mode: 'evaluate' }),
   });
   if (!res.ok) throw new Error(`Solver returned ${res.status}: ${await res.text()}`);
 }
