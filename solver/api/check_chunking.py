@@ -33,4 +33,10 @@ assert approx(sum(c), 132.6), sum(c)
 assert all(x <= 10 + 1e-9 for x in c), c
 assert c[-1] > 0, "no zero-padded remainder"
 
+# Dust remainder just over a shift multiple must not produce a trailing 0.0 chunk.
+cd = chunk_labor(30.00001, 30, 10)
+assert cd[-1] > 0, cd
+assert all(x > 0 for x in cd), cd
+assert approx(sum(cd), 30.00001, eps=1e-3), sum(cd)
+
 print("check_chunking: PASS (thresholds + chunk_labor)")

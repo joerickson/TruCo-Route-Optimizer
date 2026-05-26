@@ -164,9 +164,12 @@ def chunk_labor(labor_hours: float, single_day_max: float, shift: float) -> list
         return [labor_hours]
     chunks: list[float] = []
     remaining = labor_hours
-    while remaining > 1e-9:
-        take = shift if remaining - shift > 1e-9 else remaining
-        chunks.append(round(take, 4))
+    eps = 5e-5  # below the 4-dp rounding resolution; ignore dust remainders
+    while remaining > eps:
+        take = round(min(shift, remaining), 4)
+        if take <= 0:
+            break
+        chunks.append(take)
         remaining -= take
     return chunks
 
