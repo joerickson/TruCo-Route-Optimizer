@@ -130,6 +130,47 @@ def _crews_for_day(crews: list[dict[str, Any]], branches_by_id: dict[str, dict[s
     return out
 
 
+def _chunk_thresholds(crews: list[dict[str, Any]]) -> tuple[float, float]:
+    """Return (single_day_max, shift) in person-hours.
+
+      single_day_max = the most a single crew can do in one day
+                     = max over crews of (crew_size * max_clock_hours_per_day).
+                       A property at/under this stays one stop.
+      shift          = one person-day = the smallest crew's max_clock_hours_per_day.
+                       Splitting uses this unit so a size-s crew clears ~s chunks/day.
+    """
+    if not crews:
+        return 30.0, 10.0
+    per_crew_day = [
+        int(c.get("crew_size") or 2) * float(c.get("max_clock_hours_per_day") or 8) for c in crews
+    ]
+    shift_candidates = [float(c.get("max_clock_hours_per_day") or 8) for c in crews]
+    single_day_max = max(per_crew_day)
+    shift = min(shift_candidates)
+    if shift <= 0:
+        shift = single_day_max
+    return single_day_max, shift
+
+
+def chunk_labor(labor_hours: float, single_day_max: float, shift: float) -> list[float]:
+    """Split a property's person-hours into work-chunks.
+
+      labor <= single_day_max -> [labor]            (one stop; don't fragment work
+                                                      a single crew can do in a day)
+      otherwise               -> shift-sized chunks + remainder (so multiple crews
+                                                      across multiple days cover it)
+    """
+    if labor_hours <= single_day_max:
+        return [labor_hours]
+    chunks: list[float] = []
+    remaining = labor_hours
+    while remaining > 1e-9:
+        take = shift if remaining - shift > 1e-9 else remaining
+        chunks.append(round(take, 4))
+        remaining -= take
+    return chunks
+
+
 def _properties_for_solver(props: list[dict[str, Any]], crew_size_default: int = 2) -> list[dict[str, Any]]:
     """Convert from labor-hours (person-hours) to clock-hours by dividing by crew size.
     For now we assume average crew_size of 2.0 — the solver doesn't see specific crews until assigned,
