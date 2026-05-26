@@ -83,4 +83,15 @@ describe('compareSchedules', () => {
     expect(c.fleet.driveHours.delta).toBe(0);
     expect(c.fleet.driveHours.pct).toBe(0);
   });
+
+  it('handles a crew present only in the optimized run', () => {
+    const b = run({ crew_utilization: [util('c1', 50, 9, 62)] });
+    const o = run({ crew_utilization: [util('c1', 40, 7, 50), util('c2', 30, 5, 38)] });
+    const c = compareSchedules(b, o);
+    const c2 = c.crews.find((x) => x.crewId === 'c2')!;
+    expect(c2.flag).toBe('ok');            // current clock is 0 → neither threshold fires
+    expect(c2.currentClock).toBe(0);
+    expect(c2.deltaClock).toBe(30);
+    expect(c2.crewName).toBe('c2');        // resolves from optimized side
+  });
 });

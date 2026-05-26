@@ -4,6 +4,15 @@ import type { OptimizationRun, CrewUtilization, CapacityRecommendation } from '.
 
 const OVERLOADED_HRS = 55; // current-side clock-hrs/wk above this = overloaded
 const UNDERUSED_HRS = 40;  // active crew below this = underused
+const DRIVE_SAVED_NOISE_FLOOR_HRS = 0.5; // suppress sub-30-min drive deltas in the verdict
+
+const BAND_LABELS: Record<CapacityRecommendation, string> = {
+  over_provisioned: 'over-provisioned',
+  sufficient: 'sufficient',
+  tight_but_feasible: 'tight but feasible',
+  add_crew_recommended: 'add 1-2 crews',
+  add_crew_required: 'add crews (unsustainable)',
+};
 
 export interface FleetMetric {
   current: number;
@@ -62,7 +71,9 @@ function placement(run: OptimizationRun): Map<string, PlacedProp> {
   const map = new Map<string, PlacedProp>();
   for (const r of run.routes_jsonb?.per_day ?? []) {
     for (const s of r.stops) {
-      map.set(s.property_id, { propertyName: s.property_name, crewName: r.crew_name, day: r.day_of_week });
+      if (!map.has(s.property_id)) {
+        map.set(s.property_id, { propertyName: s.property_name, crewName: r.crew_name, day: r.day_of_week });
+      }
     }
   }
   return map;
@@ -179,9 +190,9 @@ function buildVerdict(
   } else {
     parts.push('Both plans use the same number of active crews.');
   }
-  if (driveSaved > 0.5) parts.push(`Drive time drops ${driveSaved.toFixed(1)} hr/week.`);
+  if (driveSaved > DRIVE_SAVED_NOISE_FLOOR_HRS) parts.push(`Drive time drops ${driveSaved.toFixed(1)} hr/week.`);
   if (currentBand && optimizedBand && currentBand !== optimizedBand) {
-    parts.push(`Capacity outlook improves from "${currentBand}" to "${optimizedBand}".`);
+    parts.push(`Capacity outlook improves from "${BAND_LABELS[currentBand]}" to "${BAND_LABELS[optimizedBand]}".`);
   }
   return parts.join(' ');
 }
