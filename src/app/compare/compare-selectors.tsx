@@ -1,12 +1,33 @@
 'use client';
 import { useRouter, useSearchParams } from 'next/navigation';
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from '@/components/ui/select';
 
-interface RunOption { id: string; name: string; created_at: string; }
+interface RunOption {
+  id: string;
+  name: string;
+  created_at: string;
+}
+
+function shortDate(iso: string): string {
+  return new Date(iso).toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+}
 
 export function CompareSelectors({
-  baselines, optimized, baselineId, optimizedId,
+  baselines,
+  optimized,
+  baselineId,
+  optimizedId,
 }: {
-  baselines: RunOption[]; optimized: RunOption[]; baselineId: string | null; optimizedId: string | null;
+  baselines: RunOption[];
+  optimized: RunOption[];
+  baselineId: string | null;
+  optimizedId: string | null;
 }) {
   const router = useRouter();
   const params = useSearchParams();
@@ -19,20 +40,36 @@ export function CompareSelectors({
 
   return (
     <div className="grid gap-4 md:grid-cols-2">
-      <label className="text-sm">
+      <div className="text-sm">
         <span className="mb-1 block text-muted-foreground">Current (baseline)</span>
-        <select className="w-full rounded-md border bg-background px-3 py-2 text-sm" value={baselineId ?? ''} onChange={(e) => set('baseline', e.target.value)}>
-          <option value="" disabled>Select a baseline…</option>
-          {baselines.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-        </select>
-      </label>
-      <label className="text-sm">
+        <Select value={baselineId ?? undefined} onValueChange={(v) => set('baseline', v)}>
+          <SelectTrigger>
+            <SelectValue placeholder="Select a baseline…" />
+          </SelectTrigger>
+          <SelectContent>
+            {baselines.map((r) => (
+              <SelectItem key={r.id} value={r.id}>
+                {r.name} · {shortDate(r.created_at)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
+      <div className="text-sm">
         <span className="mb-1 block text-muted-foreground">Optimized run</span>
-        <select className="w-full rounded-md border bg-background px-3 py-2 text-sm" value={optimizedId ?? ''} onChange={(e) => set('optimized', e.target.value)}>
-          <option value="" disabled>Select an optimized run…</option>
-          {optimized.map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
-        </select>
-      </label>
+        <Select value={optimizedId ?? undefined} onValueChange={(v) => set('optimized', v)}>
+          <SelectTrigger>
+            <SelectValue placeholder="Select an optimized run…" />
+          </SelectTrigger>
+          <SelectContent>
+            {optimized.map((r) => (
+              <SelectItem key={r.id} value={r.id}>
+                {r.name} · {shortDate(r.created_at)}
+              </SelectItem>
+            ))}
+          </SelectContent>
+        </Select>
+      </div>
     </div>
   );
 }

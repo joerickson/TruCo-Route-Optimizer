@@ -4,7 +4,7 @@ import { getServerClient } from '@/lib/supabase';
 import type { OptimizationRun } from '@/lib/types';
 import { compareSchedules } from '@/lib/schedule-compare';
 import { CompareSelectors } from './compare-selectors';
-import { UploadSchedule } from './upload-schedule';
+import { UploadScheduleButton } from './upload-schedule';
 import { FleetSummary } from './fleet-summary';
 import { CrewDeltas } from './crew-deltas';
 import { PropertyChanges } from './property-changes';
@@ -49,20 +49,24 @@ export default async function ComparePage({ searchParams }: { searchParams: { ba
 
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight">Current vs optimized</h1>
-        <p className="text-sm text-muted-foreground">
-          Score your real-world schedule on the same yardstick as the optimizer and see what to change.
-        </p>
+      <div className="flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Current vs optimized</h1>
+          <p className="text-sm text-muted-foreground">
+            Score your real-world schedule on the same yardstick as the optimizer and see what to change.
+          </p>
+        </div>
+        <UploadScheduleButton defaultWeek={nextMonday()} />
       </div>
-
-      <UploadSchedule defaultWeek={nextMonday()} />
 
       {baselines.length === 0 ? (
         <Card>
           <CardHeader>
             <CardTitle>No baseline yet</CardTitle>
-            <CardDescription>Upload a current schedule above to create one.</CardDescription>
+            <CardDescription>
+              Use “Upload schedule” above to score your current schedule, then compare it against an
+              optimized run here.
+            </CardDescription>
           </CardHeader>
         </Card>
       ) : (
