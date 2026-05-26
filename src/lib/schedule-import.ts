@@ -1,8 +1,6 @@
 // Standalone current-schedule import — maps a schedule sheet (external_id -> crew, day)
 // onto existing properties' assigned_crew_id / assigned_day_of_week.
 // Shares the skipped-row shape with csv-import.ts.
-import Papa from 'papaparse';
-import * as XLSX from 'xlsx';
 import type { SkippedRow } from './csv-import';
 
 const DAY_NAMES: Record<string, number> = {
@@ -43,9 +41,3 @@ export interface ScheduleImportResult {
 
 // Re-export types so consumers can import from a single location
 export type { SkippedRow };
-
-// Papa and XLSX are used by parseScheduleFile (added in a later task).
-// Declare intentional references to suppress tree-shaking / lint warnings
-// without marking them as used in dead code.
-void (Papa as unknown);
-void (XLSX as unknown);
