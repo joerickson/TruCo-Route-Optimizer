@@ -1,11 +1,13 @@
 """OR-Tools VRP solver — runs once per weekday.
 
 Inputs (per day):
-  - properties_for_day:   list of dicts (id, name, address, lat, lng, est_clock_hours)
+  - properties_for_day:   list of work-chunk dicts (property_id, name, address, lat, lng,
+                                                     labor_hours [person-hours per chunk],
+                                                     chunk_index, chunk_count)
   - crews_for_day:        list of dicts (id, name, branch_id, branch_lat, branch_lng,
-                                         max_clock_hours)
-  - distance_matrix:      square int matrix in *seconds*; index 0..len(crews)-1 are
-                          per-crew start depots; remaining indices are properties
+                                         crew_size, max_clock_hours)
+  - distance_matrix:      square int matrix in *seconds*; indices 0..n_crews-1 are
+                          per-crew start depots; remaining indices are chunk nodes
 
 Output:
   - list[CrewDayRoute] (see types in api/solver.py)
@@ -35,6 +37,7 @@ def solve_day(
     if not properties_for_day or not crews_for_day:
         return {"routes": [], "unassigned": [p["id"] for p in properties_for_day]}
 
+    # Node layout: indices 0..n_crews-1 are per-crew start depots; the rest are chunk nodes.
     coords: list[tuple[float, float]] = []
     for c in crews_for_day:
         coords.append((float(c["branch_lat"]), float(c["branch_lng"])))
@@ -151,6 +154,7 @@ def _extract_routes(
 
             if this_node >= n_crews:  # chunk node
                 prop = properties_for_day[this_node - n_crews]
+                # round() here; the routing callback uses // (floor). They differ by <=1s/stop — cosmetic, not load-bearing.
                 service_seconds = int(round(float(prop["labor_hours"]) / size * 3600))
                 arrival_h = cursor_seconds // 3600
                 arrival_m = (cursor_seconds % 3600) // 60
