@@ -129,14 +129,18 @@ def _day_of(buckets: dict[int, list[dict[str, Any]]], chunk_id: str) -> int | No
 
 
 def _bucketize_properties(
-    properties: list[dict[str, Any]], crews: list[dict[str, Any]]
+    properties: list[dict[str, Any]],
+    crews: list[dict[str, Any]],
+    day_caps: dict[int, float],
 ) -> dict[int, list[dict[str, Any]]]:
-    """Distribute properties across the 5 weekdays.
+    """Distribute work-chunks across the 5 weekdays, respecting per-day capacity.
 
-    Strategy:
-      - If property has assigned_day_of_week, honor it (soft, but we don't move it here).
-      - Otherwise greedy round-robin in geographic order by latitude band, balancing total
-        labor hours across days. Cheap heuristic — solver does the real work within a day.
+    - Single-chunk properties honor their assigned day (sticky). Multi-chunk (split)
+      properties spread (free pool).
+    - Free chunks are placed first-fit-decreasing: largest first, onto the work-day
+      with the most remaining spare (capacity minus labor already there) that still
+      fits; if none fits, the max-spare day (it'll surface as unassigned / get
+      rebalanced). solve_day does the real routing within a day.
     """
     work_days = [d for d in (1, 2, 3, 4, 5) if any(c.get(WEEKDAY_FIELDS[d]) for c in crews)]
     if not work_days:
@@ -147,8 +151,6 @@ def _bucketize_properties(
     sticky: list[dict[str, Any]] = []
     free: list[dict[str, Any]] = []
     for p in properties:
-        # Single-chunk properties honor their assigned day. Multi-chunk (split)
-        # properties must span days, so they go into the free pool to spread.
         if p.get("chunk_count", 1) == 1 and p.get("assigned_day_of_week") in work_days:
             sticky.append(p)
         else:
@@ -157,14 +159,19 @@ def _bucketize_properties(
     for p in sticky:
         buckets[p["assigned_day_of_week"]].append(p)
 
-    # Sort free chunks by lat (rough geographic banding) then balance by labor-hours.
-    free.sort(key=lambda p: (float(p["lat"] or 0), float(p["lng"] or 0)))
-    day_loads: dict[int, float] = {d: sum(float(x["labor_hours"]) for x in buckets[d]) for d in work_days}
+    # Remaining spare = capacity minus sticky labor already placed.
+    spare: dict[int, float] = {
+        d: day_caps.get(d, 0.0) - sum(float(x["labor_hours"]) for x in buckets[d]) for d in work_days
+    }
 
+    # First-fit-decreasing: largest chunks first, onto the day with most spare that fits.
+    free.sort(key=lambda p: float(p["labor_hours"]), reverse=True)
     for p in free:
-        target = min(work_days, key=lambda d: day_loads[d])
+        labor = float(p["labor_hours"])
+        fits = [d for d in work_days if spare[d] >= labor]
+        target = max(fits, key=lambda d: spare[d]) if fits else max(work_days, key=lambda d: spare[d])
         buckets[target].append(p)
-        day_loads[target] += float(p["labor_hours"])
+        spare[target] -= labor
 
     return buckets
 
@@ -461,7 +468,8 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
 
     branches_by_id = {b["id"]: b for b in branches}
     solver_props = _properties_for_solver(properties, crews)
-    buckets = _bucketize_properties(solver_props, crews)
+    day_caps = _day_capacities(crews, branches_by_id)
+    buckets = _bucketize_properties(solver_props, crews, day_caps)
 
     all_routes: list[dict[str, Any]] = []
     unassigned: list[str] = []

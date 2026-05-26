@@ -71,13 +71,15 @@ assert all(c["assigned_crew_id"] == "c1" and c["assigned_day_of_week"] == 2 for 
 
 print("check_chunking: PASS (properties_for_solver)")
 
-from index import _bucketize_properties
+from index import _bucketize_properties, _day_capacities
 
 bucket_crews = [
-    {"crew_size": 2, "max_clock_hours_per_day": 10,
+    {"crew_size": 2, "max_clock_hours_per_day": 10, "home_branch_id": "b1",
      "works_monday": True, "works_tuesday": True, "works_wednesday": True,
      "works_thursday": True, "works_friday": True},
 ]
+# 2*10*0.85 = 17 person-hrs per day
+bucket_caps = _day_capacities(bucket_crews, {"b1": {"id": "b1", "lat": 40, "lng": -111}})
 sticky_chunk = {"id": "s", "property_id": "s", "labor_hours": 8, "lat": 40.0, "lng": -111.0,
                 "assigned_day_of_week": 2, "chunk_count": 1}
 split_chunks = [
@@ -85,7 +87,7 @@ split_chunks = [
      "assigned_day_of_week": 2, "chunk_count": 4}
     for k in range(1, 5)
 ]
-buckets = _bucketize_properties([sticky_chunk, *split_chunks], bucket_crews)
+buckets = _bucketize_properties([sticky_chunk, *split_chunks], bucket_crews, bucket_caps)
 assert any(c["id"] == "s" for c in buckets[2]), "single-chunk sticky to assigned day"
 split_days = [d for d, items in buckets.items() for c in items if c["property_id"] == "b"]
 assert len(set(split_days)) > 1, f"split property should spread across days, got {split_days}"
@@ -155,4 +157,28 @@ assert _day_of(buckets_t, "y") == 2
 assert _day_of(buckets_t, "missing") is None
 
 print("check_chunking: PASS (rebalance helpers)")
+# --- capacity-aware _bucketize_properties ---
+from index import _bucketize_properties as _buck2
+
+bcrews = [  # one crew Mon-Fri, 2-person 10h => each day cap = 20 *0.85 = 17 person-hrs
+    {"crew_size": 2, "max_clock_hours_per_day": 10, "home_branch_id": "b1",
+     "works_monday": True, "works_tuesday": True, "works_wednesday": True,
+     "works_thursday": True, "works_friday": True},
+]
+bcaps = _day_capacities(bcrews, {"b1": {"id": "b1", "lat": 40, "lng": -111}})
+# Five free chunks of 10 person-hrs each (no assigned day). Day cap 17 => ~1 chunk/day.
+free_chunks = [
+    {"id": f"f{k}", "property_id": f"f{k}", "labor_hours": 10, "lat": 40.0, "lng": -111.0, "chunk_count": 2}
+    for k in range(5)
+]
+bk = _buck2(free_chunks, bcrews, bcaps)
+assert all(len(bk[d]) <= 1 for d in bk), {d: len(v) for d, v in bk.items()}
+placed = sorted(c["id"] for v in bk.values() for c in v)
+assert placed == ["f0", "f1", "f2", "f3", "f4"], placed
+sticky = {"id": "s", "property_id": "s", "labor_hours": 4, "lat": 40.0, "lng": -111.0,
+          "assigned_day_of_week": 3, "chunk_count": 1}
+bk2 = _buck2([sticky], bcrews, bcaps)
+assert any(c["id"] == "s" for c in bk2[3]), "sticky honored"
+
+print("check_chunking: PASS (capacity bucketize)")
 print("check_chunking: ALL PASS")
