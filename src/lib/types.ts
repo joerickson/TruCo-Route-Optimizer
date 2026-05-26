@@ -89,6 +89,9 @@ export interface RouteStop {
   arrival_time: string; // "HH:MM"
   service_minutes: number;
   drive_minutes_to: number;
+  // Set when a large property was split into multiple work-chunks; 1/1 otherwise.
+  chunk_index?: number;
+  chunk_count?: number;
 }
 
 export interface CrewDayRoute {
