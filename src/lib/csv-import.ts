@@ -14,6 +14,8 @@ export interface AspireImportRow {
   contract_start_date: string | null;
   contract_end_date: string | null;
   notes: string | null;
+  assigned_crew_name: string | null;
+  assigned_day_raw: string | null;
 }
 
 export interface SkippedRow {
@@ -112,6 +114,9 @@ function mapRow(raw: Record<string, unknown>, rowNumber: number): AspireImportRo
   const endDate = parseAspireDate(raw['Opportunity End Date'], 'Opportunity End Date');
   if (!endDate.ok) return skip(endDate.reason);
 
+  const assignedCrew = getStr(raw, 'Crew') || getStr(raw, 'Assigned Crew') || null;
+  const assignedDay = getStr(raw, 'Service Day') || getStr(raw, 'Day') || null;
+
   return {
     external_id: externalId,
     name,
@@ -123,6 +128,8 @@ function mapRow(raw: Record<string, unknown>, rowNumber: number): AspireImportRo
     contract_start_date: startDate.value,
     contract_end_date: endDate.value,
     notes: opportunityName,
+    assigned_crew_name: assignedCrew,
+    assigned_day_raw: assignedDay,
   };
 }
 
