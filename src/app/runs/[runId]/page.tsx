@@ -10,6 +10,8 @@ import { RunRefresher } from './refresher';
 import { ExportCsvButton } from './export-csv';
 import { RunViewToggle } from './run-view-toggle';
 import { RoutesMapLoader } from './routes-map-loader';
+import { RunCalendar } from './run-calendar';
+import { buildCalendarGrid, type CrewAvailability } from '@/lib/calendar-grid';
 import type { RoutesMapCrew, RoutesMapDepot, RoutesMapUnassigned } from './routes-map';
 
 export const dynamic = 'force-dynamic';
@@ -21,7 +23,8 @@ export default async function RunPage({
   params: { runId: string };
   searchParams: { view?: string };
 }) {
-  const view: 'list' | 'map' = searchParams.view === 'map' ? 'map' : 'list';
+  const view: 'list' | 'map' | 'calendar' =
+    searchParams.view === 'map' ? 'map' : searchParams.view === 'calendar' ? 'calendar' : 'list';
   const supabase = getServerClient();
   const { data, error } = await supabase
     .from('optimization_runs')
@@ -72,7 +75,13 @@ export default async function RunPage({
       )}
 
       {run.status === 'completed' &&
-        (view === 'map' ? <RunMap run={run} /> : <CompletedRun run={run} />)}
+        (view === 'map' ? (
+          <RunMap run={run} />
+        ) : view === 'calendar' ? (
+          <RunCalendarView run={run} />
+        ) : (
+          <CompletedRun run={run} />
+        ))}
     </div>
   );
 }
@@ -141,6 +150,46 @@ async function RunMap({ run }: { run: OptimizationRun }) {
       days={days}
     />
   );
+}
+
+async function RunCalendarView({ run }: { run: OptimizationRun }) {
+  const supabase = getServerClient();
+  const routes: CrewDayRoute[] = run.routes_jsonb?.per_day ?? [];
+  const crewUtil = run.crew_utilization ?? [];
+  const crewIds = crewUtil.map((c) => c.crew_id);
+
+  const crewsById: Record<string, CrewAvailability> = {};
+  if (crewIds.length > 0) {
+    const { data: crewRows } = await supabase
+      .from('crews')
+      .select(
+        'id, works_monday, works_tuesday, works_wednesday, works_thursday, works_friday, max_clock_hours_per_day'
+      )
+      .in('id', crewIds);
+    for (const c of (crewRows ?? []) as Array<{
+      id: string;
+      works_monday: boolean;
+      works_tuesday: boolean;
+      works_wednesday: boolean;
+      works_thursday: boolean;
+      works_friday: boolean;
+      max_clock_hours_per_day: number | string | null;
+    }>) {
+      crewsById[c.id] = {
+        works: {
+          1: !!c.works_monday,
+          2: !!c.works_tuesday,
+          3: !!c.works_wednesday,
+          4: !!c.works_thursday,
+          5: !!c.works_friday,
+        },
+        maxHoursPerDay: Number(c.max_clock_hours_per_day ?? 8) || 8,
+      };
+    }
+  }
+
+  const grid = buildCalendarGrid(routes, crewUtil, crewsById);
+  return <RunCalendar grid={grid} />;
 }
 
 function RunStatusBadge({ status }: { status: string }) {
