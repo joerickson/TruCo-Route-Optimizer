@@ -22,7 +22,7 @@ function defaultPeakWeek(): string {
 export default async function OptimizePage() {
   const supabase = getServerClient();
   const [{ data: runs }, { count: propCount }, { count: crewCount }, { count: branchCount }] = await Promise.all([
-    supabase.from('optimization_runs').select('*').order('created_at', { ascending: false }).limit(20),
+    supabase.from('optimization_runs').select('*').eq('run_kind', 'optimized').order('created_at', { ascending: false }).limit(20),
     supabase.from('properties').select('*', { count: 'exact', head: true }).eq('is_active', true).not('lat', 'is', null),
     supabase.from('crews').select('*', { count: 'exact', head: true }).eq('is_active', true),
     supabase.from('branches').select('*', { count: 'exact', head: true }).eq('is_active', true),

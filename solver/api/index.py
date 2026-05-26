@@ -151,6 +151,7 @@ def _properties_for_solver(props: list[dict[str, Any]], crew_size_default: int =
                 "est_clock_hours": clock,
                 "preferred_day_of_week": p.get("preferred_day_of_week"),
                 "assigned_day_of_week": p.get("assigned_day_of_week"),
+                "assigned_crew_id": p.get("assigned_crew_id"),
             }
         )
     return out
@@ -183,19 +184,18 @@ def _classify_capacity(avg_clock_per_crew: float) -> tuple[str, str]:
     )
 
 
-def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
-    started = time.time()
-    crews = payload["crews"]
-    branches = payload["branches"]
-    properties = payload["properties"]
+def _aggregate_result(
+    crews: list[dict[str, Any]],
+    all_routes: list[dict[str, Any]],
+    unassigned: list[str],
+    properties: list[dict[str, Any]],
+    elapsed: float,
+) -> dict[str, Any]:
+    """Aggregate per-day routes into a persisted run result.
 
-    branches_by_id = {b["id"]: b for b in branches}
-    solver_props = _properties_for_solver(properties)
-    buckets = _bucketize_properties(solver_props, crews)
-
-    all_routes: list[dict[str, Any]] = []
-    unassigned: list[str] = []
-
+    Shared by run_optimization and run_evaluation so both compute crew
+    utilization, totals, and the capacity band identically.
+    """
     crew_totals: dict[str, dict[str, Any]] = {
         c["id"]: {
             "crew_id": c["id"],
@@ -212,31 +212,14 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
         days_worked = sum(1 for d in WEEKDAY_FIELDS.values() if c.get(d))
         crew_totals[c["id"]]["max_weekly"] = days_worked * float(c.get("max_clock_hours_per_day") or 8)
 
-    for day, props_for_day in buckets.items():
-        if not props_for_day:
+    for r in all_routes:
+        t = crew_totals.get(r["crew_id"])
+        if t is None:
             continue
-        crews_today = _crews_for_day(crews, branches_by_id, day)
-        if not crews_today:
-            unassigned.extend(p["id"] for p in props_for_day)
-            continue
-
-        # Per-day OR-Tools time. GLS metaheuristic uses the FULL time budget
-        # even on tiny inputs, so this multiplies by # of non-empty days.
-        # Vercel's edge proxy kills connections with no first-byte-out within
-        # 60s, so total budget here must stay well under that. 5 days × 8s = 40s
-        # max for the solver, leaving ~20s headroom for cold start + persist.
-        result = solve_day(day, props_for_day, crews_today, time_limit_seconds=8)
-        all_routes.extend(result["routes"])
-        unassigned.extend(result.get("unassigned", []))
-
-        for r in result["routes"]:
-            t = crew_totals.get(r["crew_id"])
-            if t is None:
-                continue
-            t["clock_hours"] += r["clock_hours"]
-            t["drive_hours"] += r["drive_hours"]
-            t["drive_miles"] += r["drive_miles"]
-            t["props_assigned"] += len(r["stops"])
+        t["clock_hours"] += r["clock_hours"]
+        t["drive_hours"] += r["drive_hours"]
+        t["drive_miles"] += r["drive_miles"]
+        t["props_assigned"] += len(r["stops"])
 
     crew_utilization = []
     for ct in crew_totals.values():
@@ -257,13 +240,12 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
     total_clock = sum(c["clock_hours"] for c in crew_utilization)
     total_drive = sum(c["drive_hours"] for c in crew_utilization)
     total_miles = sum(c["drive_miles"] for c in crew_utilization)
+    # NB: raw properties (person-hours). Do NOT pass solver_props — it has est_clock_hours, not est_labor_hours.
     total_labor_persons = sum(float(p["est_labor_hours"]) for p in properties)
 
     n_active_crews = sum(1 for c in crew_utilization if c["clock_hours"] > 0)
     avg_clock_per_crew = total_clock / max(1, n_active_crews)
     rec_code, rec_text = _classify_capacity(avg_clock_per_crew)
-
-    elapsed = time.time() - started
 
     return {
         "status": "completed",
@@ -278,6 +260,105 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
         "routes_jsonb": {"per_day": all_routes},
         "unassigned_property_ids": unassigned,
     }
+
+
+def _group_by_crew_day(
+    solver_props: list[dict[str, Any]],
+) -> tuple[dict[tuple[int, str], list[dict[str, Any]]], list[str]]:
+    """Group properties by their fixed (assigned_day_of_week, assigned_crew_id).
+
+    Returns (groups, unassigned_ids). A property with no crew or no day is
+    unassigned — it is part of today's schedule on paper but not actually
+    routed to anyone.
+    """
+    groups: dict[tuple[int, str], list[dict[str, Any]]] = {}
+    unassigned: list[str] = []
+    for p in solver_props:
+        day = p.get("assigned_day_of_week")
+        crew_id = p.get("assigned_crew_id")
+        if not day or not crew_id:
+            unassigned.append(p["id"])
+            continue
+        groups.setdefault((int(day), str(crew_id)), []).append(p)
+    return groups, unassigned
+
+
+# Sentinel max-clock for evaluate mode: removes capacity as a reason to drop a
+# stop, so an overloaded crew is scored at its true hours instead of shedding
+# work. (A stop can still land in `unassigned` if it's genuinely infeasible to
+# route — solve_day keeps a finite drop penalty — but that won't happen for the
+# geocoded, single-crew groups evaluate mode builds.)
+_EVAL_MAX_CLOCK_HOURS = 1_000_000.0
+
+
+def run_evaluation(payload: dict[str, Any]) -> dict[str, Any]:
+    """Score a FIXED current schedule (properties carry assigned_crew_id +
+    assigned_day_of_week). Each crew-day is TSP-ordered with capacity relaxed;
+    aggregation is identical to run_optimization."""
+    started = time.time()
+    crews = payload["crews"]
+    branches = payload["branches"]
+    properties = payload["properties"]
+
+    branches_by_id = {b["id"]: b for b in branches}
+    crews_by_id = {c["id"]: c for c in crews}
+    solver_props = _properties_for_solver(properties)
+    groups, unassigned = _group_by_crew_day(solver_props)
+
+    all_routes: list[dict[str, Any]] = []
+
+    for (day, crew_id), props_for_group in groups.items():
+        crew = crews_by_id.get(crew_id)
+        branch = branches_by_id.get(crew["home_branch_id"]) if crew else None
+        if crew is None or branch is None:
+            # Assigned to a crew we don't have (deleted / no geocoded branch).
+            unassigned.extend(p["id"] for p in props_for_group)
+            continue
+        crew_for_day = [{
+            "id": crew["id"],
+            "name": crew["name"],
+            "branch_id": branch["id"],
+            "branch_lat": branch["lat"],
+            "branch_lng": branch["lng"],
+            "max_clock_hours": _EVAL_MAX_CLOCK_HOURS,  # relaxed: no capacity-based drops
+            "crew_size": int(crew.get("crew_size") or 2),
+        }]
+        result = solve_day(day, props_for_group, crew_for_day, time_limit_seconds=8)
+        all_routes.extend(result["routes"])
+        unassigned.extend(result.get("unassigned", []))
+
+    return _aggregate_result(crews, all_routes, unassigned, properties, time.time() - started)
+
+
+def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
+    started = time.time()
+    crews = payload["crews"]
+    branches = payload["branches"]
+    properties = payload["properties"]
+
+    branches_by_id = {b["id"]: b for b in branches}
+    solver_props = _properties_for_solver(properties)
+    buckets = _bucketize_properties(solver_props, crews)
+
+    all_routes: list[dict[str, Any]] = []
+    unassigned: list[str] = []
+
+    for day, props_for_day in buckets.items():
+        if not props_for_day:
+            continue
+        crews_today = _crews_for_day(crews, branches_by_id, day)
+        if not crews_today:
+            unassigned.extend(p["id"] for p in props_for_day)
+            continue
+        # Per-day OR-Tools time. GLS metaheuristic uses the FULL time budget
+        # even on tiny inputs, so this multiplies by # of non-empty days.
+        # Vercel's edge proxy kills connections with no first-byte-out within
+        # 60s, so total budget must stay well under that (5 days × 8s = 40s).
+        result = solve_day(day, props_for_day, crews_today, time_limit_seconds=8)
+        all_routes.extend(result["routes"])
+        unassigned.extend(result.get("unassigned", []))
+
+    return _aggregate_result(crews, all_routes, unassigned, properties, time.time() - started)
 
 
 def _supabase_patch(run_id: str, fields: dict[str, Any]) -> None:
@@ -339,7 +420,8 @@ class handler(BaseHTTPRequestHandler):
             payload = json.loads(body)
 
             run_id = payload.get("run_id")
-            result = run_optimization(payload)
+            mode = payload.get("mode", "optimize")
+            result = run_evaluation(payload) if mode == "evaluate" else run_optimization(payload)
             if run_id:
                 # Let _persist failures surface to the outer except so the run
                 # row gets marked 'failed'. Returning 200 with a swallowed

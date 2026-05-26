@@ -3,6 +3,7 @@ import { revalidatePath } from 'next/cache';
 import { getServiceClient } from '@/lib/supabase';
 import { parseAspireFile, type AspireImportRow } from '@/lib/csv-import';
 import { geocodeAddress } from '@/lib/geocoding';
+import { resolveCrewId, parseDayOfWeek } from '@/lib/schedule-import';
 
 export interface ImportSummary {
   ok: true;
@@ -72,6 +73,32 @@ export async function importAspireCsv(formData: FormData): Promise<ImportActionR
       updated = result.updated;
     }
 
+    // Path A: if the export carried crew/day columns, resolve + apply assignments.
+    const withAssignment = rows.filter((r) => r.assigned_crew_name && r.assigned_day_raw && r.external_id);
+    if (withAssignment.length > 0) {
+      const { data: crewRows } = await supabase.from('crews').select('id, name').eq('is_active', true);
+      const crewsByName = new Map<string, string>();
+      for (const c of (crewRows ?? []) as Array<{ id: string; name: string }>) crewsByName.set(c.name.trim().toLowerCase(), c.id);
+      // Bucket by (crew_id, day) → one update per distinct assignment, not per row.
+      const buckets = new Map<string, { crewId: string; day: number; externalIds: string[] }>();
+      for (const r of withAssignment) {
+        const crewId = resolveCrewId(r.assigned_crew_name!, crewsByName);
+        const day = parseDayOfWeek(r.assigned_day_raw);
+        if (!crewId || !day) continue;
+        const key = `${crewId}::${day}`;
+        const bucket = buckets.get(key) ?? { crewId, day, externalIds: [] };
+        bucket.externalIds.push(r.external_id!);
+        buckets.set(key, bucket);
+      }
+      for (const { crewId, day, externalIds } of buckets.values()) {
+        const { error: assignErr } = await supabase
+          .from('properties')
+          .update({ assigned_crew_id: crewId, assigned_day_of_week: day })
+          .in('external_id', externalIds);
+        if (assignErr) console.error('Failed to apply schedule assignment:', assignErr.message);
+      }
+    }
+
     await supabase
       .from('import_runs')
       .update({ inserted_count: inserted, updated_count: updated })
@@ -120,7 +147,10 @@ async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; u
     inserted += withExt.filter((r) => !existingSet.has(r.external_id)).length;
     updated += withExt.filter((r) => existingSet.has(r.external_id)).length;
 
-    const { error } = await supabase.from('properties').upsert(withExt, { onConflict: 'external_id' });
+    const { error } = await supabase.from('properties').upsert(
+      withExt.map((r) => ({ external_id: r.external_id, ...toDbRow(r) })),
+      { onConflict: 'external_id' },
+    );
     if (error) throw new Error(error.message);
   }
 
@@ -146,7 +176,9 @@ async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; u
     }
 
     if (toInsert.length > 0) {
-      const { error } = await supabase.from('properties').insert(toInsert);
+      const { error } = await supabase.from('properties').insert(
+        toInsert.map((r) => toDbRow(r)),
+      );
       if (error) throw new Error(error.message);
       inserted += toInsert.length;
     }
@@ -155,18 +187,7 @@ async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; u
       // Bulk upsert by primary key — single round-trip update for all matched rows.
       // Important: omit external_id from the payload. Otherwise each AspireImportRow's
       // null external_id would null out any existing external_id on the matched DB row.
-      const updatePayload = toUpdate.map((r) => ({
-        id: r.id,
-        name: r.name,
-        address: r.address,
-        city: r.city,
-        state: r.state,
-        service_type: r.service_type,
-        est_labor_hours: r.est_labor_hours,
-        contract_start_date: r.contract_start_date,
-        contract_end_date: r.contract_end_date,
-        notes: r.notes,
-      }));
+      const updatePayload = toUpdate.map((r) => ({ id: r.id, ...toDbRow(r) }));
       const { error } = await supabase.from('properties').upsert(updatePayload, { onConflict: 'id' });
       if (error) throw new Error(error.message);
       updated += toUpdate.length;
@@ -174,6 +195,23 @@ async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; u
   }
 
   return { inserted, updated };
+}
+
+// The DB column subset of an AspireImportRow (excludes external_id/id and the
+// non-column assignment fields). Used by all three insert/upsert payloads so a
+// future column addition only has to be made once.
+function toDbRow(r: AspireImportRow) {
+  return {
+    name: r.name,
+    address: r.address,
+    city: r.city,
+    state: r.state,
+    service_type: r.service_type,
+    est_labor_hours: r.est_labor_hours,
+    contract_start_date: r.contract_start_date,
+    contract_end_date: r.contract_end_date,
+    notes: r.notes,
+  };
 }
 
 // Convert any Date values in raw row data to ISO strings so they round-trip through jsonb.
