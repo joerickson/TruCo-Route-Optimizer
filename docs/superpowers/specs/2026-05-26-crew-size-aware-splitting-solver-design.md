@@ -104,9 +104,14 @@ def chunk_labor(labor_hours: float, single_day_max: float, shift: float) -> list
   with the post-deploy behavior check.)
 - Each chunk becomes a solver node: `chunk_id = f"{property_id}#{k}"`, `property_id`
   (parent), `name = "<Property> (k/n)"` (or `<Property>` when `n == 1`), the
-  property's `lat/lng`, `labor_hours` (its share), `preferred_day_of_week`, and —
-  **only when `n == 1`** — `assigned_day_of_week`/`assigned_crew_id` (split
-  properties get `None`; see §3.3).
+  property's `lat/lng`, `labor_hours` (its share), `preferred_day_of_week`, and
+  `assigned_day_of_week`/`assigned_crew_id` **inherited on every chunk** plus
+  `chunk_index`/`chunk_count`. (Implementation note: every chunk keeps the
+  inherited `assigned_*` — do NOT null them on split properties. Optimize mode
+  ignores them for split properties via the `chunk_count == 1` sticky guard in
+  §3.3, while evaluate mode *needs* them so `_group_by_crew_day` regroups a split
+  property's chunks onto the crew/day the current schedule assigned. Nulling would
+  silently break evaluate-mode grouping of split properties.)
 - Chunks of one property share coordinates, so inter-chunk travel is 0 (the distance
   matrix already yields 0 for identical points — no special-casing). This is what
   lets two crews work the same property the same day at zero travel penalty.
