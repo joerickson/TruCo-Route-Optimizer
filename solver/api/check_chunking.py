@@ -40,3 +40,33 @@ assert all(x > 0 for x in cd), cd
 assert approx(sum(cd), 30.00001, eps=1e-3), sum(cd)
 
 print("check_chunking: PASS (thresholds + chunk_labor)")
+
+from index import _properties_for_solver
+
+_crews = [
+    {"crew_size": 2, "max_clock_hours_per_day": 10},
+    {"crew_size": 3, "max_clock_hours_per_day": 10},
+]
+# single_day_max = 30, shift = 10
+base = {"address": "1 Main", "lat": 40.0, "lng": -111.0,
+        "preferred_day_of_week": None, "assigned_day_of_week": 2, "assigned_crew_id": "c1"}
+props = [
+    {"id": "small", "name": "Small", "est_labor_hours": 12, **base},   # <=30 -> 1 chunk
+    {"id": "big", "name": "Big Park", "est_labor_hours": 35, **base},  # ->10,10,10,5 = 4 chunks
+    {"id": "nogeo", "name": "NoGeo", "est_labor_hours": 5,
+     "address": "x", "lat": None, "lng": None,
+     "preferred_day_of_week": None, "assigned_day_of_week": None, "assigned_crew_id": None},
+]
+chunks = _properties_for_solver(props, _crews)
+
+assert all(c["property_id"] != "nogeo" for c in chunks)
+small = [c for c in chunks if c["property_id"] == "small"]
+assert len(small) == 1 and small[0]["id"] == "small" and small[0]["chunk_count"] == 1
+assert small[0]["name"] == "Small" and approx(small[0]["labor_hours"], 12)
+big = [c for c in chunks if c["property_id"] == "big"]
+assert len(big) == 4 and [c["id"] for c in big] == ["big#1", "big#2", "big#3", "big#4"]
+assert big[0]["name"] == "Big Park (1/4)" and big[0]["chunk_index"] == 1 and big[0]["chunk_count"] == 4
+assert approx(sum(c["labor_hours"] for c in big), 35)
+assert all(c["assigned_crew_id"] == "c1" and c["assigned_day_of_week"] == 2 for c in big)
+
+print("check_chunking: PASS (properties_for_solver)")

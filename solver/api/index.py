@@ -174,30 +174,42 @@ def chunk_labor(labor_hours: float, single_day_max: float, shift: float) -> list
     return chunks
 
 
-def _properties_for_solver(props: list[dict[str, Any]], crew_size_default: int = 2) -> list[dict[str, Any]]:
-    """Convert from labor-hours (person-hours) to clock-hours by dividing by crew size.
-    For now we assume average crew_size of 2.0 — the solver doesn't see specific crews until assigned,
-    so we use a fleet-average estimate. This is acceptable for capacity planning.
+def _properties_for_solver(
+    props: list[dict[str, Any]], crews: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Convert properties into routable work-chunks (person-hours per chunk).
+
+    A property a single crew can do in a day stays one chunk; bigger ones split
+    into one-person-day chunks at the same coordinates. Service time is NOT
+    pre-divided here — solve_day applies labor ÷ crew_size per assigned crew.
+    Ungeocoded properties are skipped (the map/optimizer can't place them).
     """
-    out = []
+    single_day_max, shift = _chunk_thresholds(crews)
+    out: list[dict[str, Any]] = []
     for p in props:
         if p.get("lat") is None or p.get("lng") is None:
             continue
-        labor = float(p["est_labor_hours"])
-        clock = labor / crew_size_default
-        out.append(
-            {
-                "id": p["id"],
-                "name": p["name"],
-                "address": p["address"],
-                "lat": p["lat"],
-                "lng": p["lng"],
-                "est_clock_hours": clock,
-                "preferred_day_of_week": p.get("preferred_day_of_week"),
-                "assigned_day_of_week": p.get("assigned_day_of_week"),
-                "assigned_crew_id": p.get("assigned_crew_id"),
-            }
-        )
+        pieces = chunk_labor(float(p["est_labor_hours"]), single_day_max, shift)
+        n = len(pieces)
+        for k, piece in enumerate(pieces, start=1):
+            chunk_id = p["id"] if n == 1 else f'{p["id"]}#{k}'
+            name = p["name"] if n == 1 else f'{p["name"]} ({k}/{n})'
+            out.append(
+                {
+                    "id": chunk_id,
+                    "property_id": p["id"],
+                    "name": name,
+                    "address": p["address"],
+                    "lat": p["lat"],
+                    "lng": p["lng"],
+                    "labor_hours": piece,
+                    "preferred_day_of_week": p.get("preferred_day_of_week"),
+                    "assigned_day_of_week": p.get("assigned_day_of_week"),
+                    "assigned_crew_id": p.get("assigned_crew_id"),
+                    "chunk_index": k,
+                    "chunk_count": n,
+                }
+            )
     return out
 
 
@@ -346,7 +358,7 @@ def run_evaluation(payload: dict[str, Any]) -> dict[str, Any]:
 
     branches_by_id = {b["id"]: b for b in branches}
     crews_by_id = {c["id"]: c for c in crews}
-    solver_props = _properties_for_solver(properties)
+    solver_props = _properties_for_solver(properties, crews)
     groups, unassigned = _group_by_crew_day(solver_props)
 
     all_routes: list[dict[str, Any]] = []
@@ -381,7 +393,7 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
     properties = payload["properties"]
 
     branches_by_id = {b["id"]: b for b in branches}
-    solver_props = _properties_for_solver(properties)
+    solver_props = _properties_for_solver(properties, crews)
     buckets = _bucketize_properties(solver_props, crews)
 
     all_routes: list[dict[str, Any]] = []
