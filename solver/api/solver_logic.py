@@ -1,11 +1,13 @@
 """OR-Tools VRP solver — runs once per weekday.
 
 Inputs (per day):
-  - properties_for_day:   list of dicts (id, name, address, lat, lng, est_clock_hours)
+  - properties_for_day:   list of work-chunk dicts (property_id, name, address, lat, lng,
+                                                     labor_hours [person-hours per chunk],
+                                                     chunk_index, chunk_count)
   - crews_for_day:        list of dicts (id, name, branch_id, branch_lat, branch_lng,
-                                         max_clock_hours)
-  - distance_matrix:      square int matrix in *seconds*; index 0..len(crews)-1 are
-                          per-crew start depots; remaining indices are properties
+                                         crew_size, max_clock_hours)
+  - distance_matrix:      square int matrix in *seconds*; indices 0..n_crews-1 are
+                          per-crew start depots; remaining indices are chunk nodes
 
 Output:
   - list[CrewDayRoute] (see types in api/solver.py)
@@ -26,13 +28,16 @@ def solve_day(
     crews_for_day: list[dict[str, Any]],
     time_limit_seconds: int = 25,
 ) -> dict[str, Any]:
-    """Return {"routes": [...], "unassigned": [property_id...]}"""
+    """Return {"routes": [...], "unassigned": [chunk_id...]}.
+
+    Service time is crew-size-aware: a chunk of `labor_hours` person-hours served by
+    a size-s crew takes labor_hours/s clock-hours. Each vehicle uses the transit
+    callback for its crew size, and is capped at its own max_clock_hours/day.
+    """
     if not properties_for_day or not crews_for_day:
         return {"routes": [], "unassigned": [p["id"] for p in properties_for_day]}
 
-    # Build node list:
-    #   first len(crews) entries: per-crew start depot
-    #   next:                    properties
+    # Node layout: indices 0..n_crews-1 are per-crew start depots; the rest are chunk nodes.
     coords: list[tuple[float, float]] = []
     for c in crews_for_day:
         coords.append((float(c["branch_lat"]), float(c["branch_lng"])))
@@ -42,51 +47,49 @@ def solve_day(
     n_crews = len(crews_for_day)
     distance_matrix = build_matrix(coords)
 
-    # OR-Tools multi-depot setup. We tell it each vehicle starts at its own depot
-    # and ends back at the same depot (return-to-branch).
     starts = list(range(n_crews))
     ends = list(range(n_crews))
-
     manager = pywrapcp.RoutingIndexManager(len(coords), n_crews, starts, ends)
     routing = pywrapcp.RoutingModel(manager)
 
-    # Service-time and travel-time combined into a single "time" dimension (seconds).
-    # service_time = est_clock_hours * 3600 (added at the from-node)
-    service_seconds: list[int] = [0] * n_crews + [
-        int(round(float(p["est_clock_hours"]) * 3600)) for p in properties_for_day
+    # Person-seconds of work at each node (0 for depots). A size-s crew divides by s.
+    person_seconds: list[int] = [0] * n_crews + [
+        int(round(float(p["labor_hours"]) * 3600)) for p in properties_for_day
     ]
 
-    def time_callback(from_index: int, to_index: int) -> int:
-        from_node = manager.IndexToNode(from_index)
-        to_node = manager.IndexToNode(to_index)
-        return service_seconds[from_node] + distance_matrix[from_node][to_node]
+    # One transit callback per distinct crew size present today.
+    sizes = sorted({int(c.get("crew_size") or 2) for c in crews_for_day})
+    transit_idx_by_size: dict[int, int] = {}
+    for s in sizes:
+        def make_cb(size: int):
+            def cb(from_index: int, to_index: int) -> int:
+                fn = manager.IndexToNode(from_index)
+                tn = manager.IndexToNode(to_index)
+                return person_seconds[fn] // size + distance_matrix[fn][tn]
+            return cb
+        transit_idx_by_size[s] = routing.RegisterTransitCallback(make_cb(s))
 
-    transit_idx = routing.RegisterTransitCallback(time_callback)
-    routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
+    transit_idx_by_vehicle = [
+        transit_idx_by_size[int(c.get("crew_size") or 2)] for c in crews_for_day
+    ]
+    for v in range(n_crews):
+        routing.SetArcCostEvaluatorOfVehicle(transit_idx_by_vehicle[v], v)
 
-    # Per-crew capacity = max clock-hours for the day, in seconds.
-    capacities = [int(round(float(c["max_clock_hours"]) * 3600)) for c in crews_for_day]
-    # AddDimensionWithVehicleCapacity needs uniform max for the dimension, so we use the largest
-    # then constrain per-vehicle via SetCumulVarSoftUpperBound? — simpler: AddDimensionWithVehicleCapacity
-    # accepts a list directly via the proper method.
-    routing.AddDimensionWithVehicleCapacity(
-        transit_idx,
-        0,  # no slack
-        capacities,
-        True,  # start cumul to zero
-        "Time",
+    caps = [int(round(float(c["max_clock_hours"]) * 3600)) for c in crews_for_day]
+    dim_capacity = max(caps)  # per-vehicle real caps applied below via SetMax
+    routing.AddDimensionWithVehicleTransits(
+        transit_idx_by_vehicle, 0, dim_capacity, True, "Time"
     )
+    time_dim = routing.GetDimensionOrDie("Time")
+    for v in range(n_crews):
+        time_dim.CumulVar(routing.End(v)).SetMax(caps[v])
 
-    # Soft same-day preference penalty: properties with preferred_day_of_week set
-    # incur a "drop" penalty if assigned to today even though their preferred day was different.
-    # Implemented as a disjunction: each property can be skipped (= unassigned) at a cost.
-    # We make the skip-cost very high so the solver only drops a property if it truly can't fit.
-    drop_penalty = 10_000_000  # seconds — basically never drop unless infeasible
+    # Each chunk may be dropped (= unassigned) at a high cost — only if infeasible.
+    drop_penalty = 10_000_000
     for prop_idx in range(n_crews, len(coords)):
         node = manager.NodeToIndex(prop_idx)
         routing.AddDisjunction([node], drop_penalty)
 
-    # Search params
     search = pywrapcp.DefaultRoutingSearchParameters()
     search.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC
     search.local_search_metaheuristic = routing_enums_pb2.LocalSearchMetaheuristic.GUIDED_LOCAL_SEARCH
@@ -109,7 +112,6 @@ def solve_day(
         properties_for_day=properties_for_day,
         distance_matrix=distance_matrix,
         coords=coords,
-        service_seconds=service_seconds,
         day_of_week=day_of_week,
     )
 
@@ -124,16 +126,15 @@ def _extract_routes(
     properties_for_day: list[dict[str, Any]],
     distance_matrix: list[list[int]],
     coords: list[tuple[float, float]],
-    service_seconds: list[int],
     day_of_week: int,
 ) -> dict[str, Any]:
     routes: list[dict[str, Any]] = []
     assigned: set[str] = set()
-
-    DAY_START_HOUR = 7  # 07:00 default
+    DAY_START_HOUR = 7
 
     for v in range(n_crews):
         crew = crews_for_day[v]
+        size = int(crew.get("crew_size") or 2)
         index = routing.Start(v)
         node = manager.IndexToNode(index)
         path: list[int] = [node]
@@ -151,32 +152,34 @@ def _extract_routes(
             cursor_seconds += travel
             drive_seconds += travel
 
-            if this_node >= n_crews:  # property node
+            if this_node >= n_crews:  # chunk node
                 prop = properties_for_day[this_node - n_crews]
+                # round() here; the routing callback uses // (floor). They differ by <=1s/stop — cosmetic, not load-bearing.
+                service_seconds = int(round(float(prop["labor_hours"]) / size * 3600))
                 arrival_h = cursor_seconds // 3600
                 arrival_m = (cursor_seconds % 3600) // 60
                 stops.append(
                     {
-                        "property_id": prop["id"],
+                        "property_id": prop.get("property_id", prop["id"]),
                         "property_name": prop["name"],
                         "address": prop["address"],
                         "lat": float(prop["lat"]),
                         "lng": float(prop["lng"]),
                         "arrival_time": f"{arrival_h:02d}:{arrival_m:02d}",
-                        "service_minutes": int(round(float(prop["est_clock_hours"]) * 60)),
+                        "service_minutes": int(round(float(prop["labor_hours"]) / size * 60)),
                         "drive_minutes_to": int(round(travel / 60)),
+                        "chunk_index": prop.get("chunk_index", 1),
+                        "chunk_count": prop.get("chunk_count", 1),
                     }
                 )
                 assigned.add(prop["id"])
-
-                cursor_seconds += service_seconds[this_node]
-                clock_seconds += service_seconds[this_node]
+                cursor_seconds += service_seconds
+                clock_seconds += service_seconds
 
             path.append(this_node)
             prev_node = this_node
             index = solution.Value(routing.NextVar(index))
 
-        # Return to depot
         end_node = manager.IndexToNode(routing.End(v))
         travel_home = distance_matrix[prev_node][end_node]
         cursor_seconds += travel_home

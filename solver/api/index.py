@@ -87,7 +87,9 @@ def _bucketize_properties(
     sticky: list[dict[str, Any]] = []
     free: list[dict[str, Any]] = []
     for p in properties:
-        if p.get("assigned_day_of_week") in work_days:
+        # Single-chunk properties honor their assigned day. Multi-chunk (split)
+        # properties must span days, so they go into the free pool to spread.
+        if p.get("chunk_count", 1) == 1 and p.get("assigned_day_of_week") in work_days:
             sticky.append(p)
         else:
             free.append(p)
@@ -95,14 +97,14 @@ def _bucketize_properties(
     for p in sticky:
         buckets[p["assigned_day_of_week"]].append(p)
 
-    # Sort free properties by lat (rough geographic banding) then balance by load.
+    # Sort free chunks by lat (rough geographic banding) then balance by labor-hours.
     free.sort(key=lambda p: (float(p["lat"] or 0), float(p["lng"] or 0)))
-    day_loads: dict[int, float] = {d: sum(float(x["est_clock_hours"]) for x in buckets[d]) for d in work_days}
+    day_loads: dict[int, float] = {d: sum(float(x["labor_hours"]) for x in buckets[d]) for d in work_days}
 
     for p in free:
         target = min(work_days, key=lambda d: day_loads[d])
         buckets[target].append(p)
-        day_loads[target] += float(p["est_clock_hours"])
+        day_loads[target] += float(p["labor_hours"])
 
     return buckets
 
@@ -130,30 +132,86 @@ def _crews_for_day(crews: list[dict[str, Any]], branches_by_id: dict[str, dict[s
     return out
 
 
-def _properties_for_solver(props: list[dict[str, Any]], crew_size_default: int = 2) -> list[dict[str, Any]]:
-    """Convert from labor-hours (person-hours) to clock-hours by dividing by crew size.
-    For now we assume average crew_size of 2.0 — the solver doesn't see specific crews until assigned,
-    so we use a fleet-average estimate. This is acceptable for capacity planning.
+def _chunk_thresholds(crews: list[dict[str, Any]]) -> tuple[float, float]:
+    """Return (single_day_max, shift) in person-hours.
+
+      single_day_max = the most a single crew can do in one day
+                     = max over crews of (crew_size * max_clock_hours_per_day).
+                       A property at/under this stays one stop.
+      shift          = one person-day = the smallest crew's max_clock_hours_per_day.
+                       Splitting uses this unit so a size-s crew clears ~s chunks/day.
     """
-    out = []
+    if not crews:
+        return 30.0, 10.0
+    per_crew_day = [
+        int(c.get("crew_size") or 2) * float(c.get("max_clock_hours_per_day") or 8) for c in crews
+    ]
+    shift_candidates = [float(c.get("max_clock_hours_per_day") or 8) for c in crews]
+    single_day_max = max(per_crew_day)
+    shift = min(shift_candidates)
+    if shift <= 0:
+        shift = single_day_max
+    return single_day_max, shift
+
+
+def chunk_labor(labor_hours: float, single_day_max: float, shift: float) -> list[float]:
+    """Split a property's person-hours into work-chunks.
+
+      labor <= single_day_max -> [labor]            (one stop; don't fragment work
+                                                      a single crew can do in a day)
+      otherwise               -> shift-sized chunks + remainder (so multiple crews
+                                                      across multiple days cover it)
+    """
+    if labor_hours <= single_day_max:
+        return [labor_hours]
+    chunks: list[float] = []
+    remaining = labor_hours
+    eps = 5e-5  # below the 4-dp rounding resolution; ignore dust remainders
+    while remaining > eps:
+        take = round(min(shift, remaining), 4)
+        if take <= 0:
+            break
+        chunks.append(take)
+        remaining -= take
+    return chunks
+
+
+def _properties_for_solver(
+    props: list[dict[str, Any]], crews: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Convert properties into routable work-chunks (person-hours per chunk).
+
+    A property a single crew can do in a day stays one chunk; bigger ones split
+    into one-person-day chunks at the same coordinates. Service time is NOT
+    pre-divided here — solve_day applies labor ÷ crew_size per assigned crew.
+    Ungeocoded properties are skipped (the map/optimizer can't place them).
+    """
+    single_day_max, shift = _chunk_thresholds(crews)
+    out: list[dict[str, Any]] = []
     for p in props:
         if p.get("lat") is None or p.get("lng") is None:
             continue
-        labor = float(p["est_labor_hours"])
-        clock = labor / crew_size_default
-        out.append(
-            {
-                "id": p["id"],
-                "name": p["name"],
-                "address": p["address"],
-                "lat": p["lat"],
-                "lng": p["lng"],
-                "est_clock_hours": clock,
-                "preferred_day_of_week": p.get("preferred_day_of_week"),
-                "assigned_day_of_week": p.get("assigned_day_of_week"),
-                "assigned_crew_id": p.get("assigned_crew_id"),
-            }
-        )
+        pieces = chunk_labor(float(p["est_labor_hours"]), single_day_max, shift)
+        n = len(pieces)
+        for k, piece in enumerate(pieces, start=1):
+            chunk_id = p["id"] if n == 1 else f'{p["id"]}#{k}'
+            name = p["name"] if n == 1 else f'{p["name"]} ({k}/{n})'
+            out.append(
+                {
+                    "id": chunk_id,
+                    "property_id": p["id"],
+                    "name": name,
+                    "address": p["address"],
+                    "lat": p["lat"],
+                    "lng": p["lng"],
+                    "labor_hours": piece,
+                    "preferred_day_of_week": p.get("preferred_day_of_week"),
+                    "assigned_day_of_week": p.get("assigned_day_of_week"),
+                    "assigned_crew_id": p.get("assigned_crew_id"),
+                    "chunk_index": k,
+                    "chunk_count": n,
+                }
+            )
     return out
 
 
@@ -205,6 +263,7 @@ def _aggregate_result(
             "drive_miles": 0.0,
             "props_assigned": 0,
             "max_weekly": 0.0,
+            "_prop_ids": set(),
         }
         for c in crews
     }
@@ -219,7 +278,7 @@ def _aggregate_result(
         t["clock_hours"] += r["clock_hours"]
         t["drive_hours"] += r["drive_hours"]
         t["drive_miles"] += r["drive_miles"]
-        t["props_assigned"] += len(r["stops"])
+        t["_prop_ids"].update(s["property_id"] for s in r["stops"])
 
     crew_utilization = []
     for ct in crew_totals.values():
@@ -232,7 +291,7 @@ def _aggregate_result(
                 "drive_hours": round(ct["drive_hours"], 2),
                 "work_hours": round(ct["clock_hours"] - ct["drive_hours"], 2),
                 "drive_miles": round(ct["drive_miles"], 1),
-                "props_assigned": ct["props_assigned"],
+                "props_assigned": len(ct["_prop_ids"]),
                 "util_pct": round(util_pct, 1),
             }
         )
@@ -240,12 +299,16 @@ def _aggregate_result(
     total_clock = sum(c["clock_hours"] for c in crew_utilization)
     total_drive = sum(c["drive_hours"] for c in crew_utilization)
     total_miles = sum(c["drive_miles"] for c in crew_utilization)
-    # NB: raw properties (person-hours). Do NOT pass solver_props — it has est_clock_hours, not est_labor_hours.
+    # NB: raw properties (person-hours). Do NOT pass solver_props — those are chunks (labor_hours), not whole-property est_labor_hours.
     total_labor_persons = sum(float(p["est_labor_hours"]) for p in properties)
 
     n_active_crews = sum(1 for c in crew_utilization if c["clock_hours"] > 0)
     avg_clock_per_crew = total_clock / max(1, n_active_crews)
     rec_code, rec_text = _classify_capacity(avg_clock_per_crew)
+
+    # `unassigned` holds chunk ids ("propId" or "propId#k"); a property is unassigned
+    # if ANY of its chunks is. Map back to distinct property ids.
+    unassigned_property_ids = sorted({str(cid).rsplit("#", 1)[0] for cid in unassigned})
 
     return {
         "status": "completed",
@@ -258,7 +321,7 @@ def _aggregate_result(
         "capacity_recommendation": rec_code,
         "recommendation_text": rec_text,
         "routes_jsonb": {"per_day": all_routes},
-        "unassigned_property_ids": unassigned,
+        "unassigned_property_ids": unassigned_property_ids,
     }
 
 
@@ -302,7 +365,7 @@ def run_evaluation(payload: dict[str, Any]) -> dict[str, Any]:
 
     branches_by_id = {b["id"]: b for b in branches}
     crews_by_id = {c["id"]: c for c in crews}
-    solver_props = _properties_for_solver(properties)
+    solver_props = _properties_for_solver(properties, crews)
     groups, unassigned = _group_by_crew_day(solver_props)
 
     all_routes: list[dict[str, Any]] = []
@@ -337,7 +400,7 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
     properties = payload["properties"]
 
     branches_by_id = {b["id"]: b for b in branches}
-    solver_props = _properties_for_solver(properties)
+    solver_props = _properties_for_solver(properties, crews)
     buckets = _bucketize_properties(solver_props, crews)
 
     all_routes: list[dict[str, Any]] = []
