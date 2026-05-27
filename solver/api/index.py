@@ -784,6 +784,8 @@ def _redeploy_surplus(
         b = plan["branches"].setdefault(src_bid, {"crews_after": {"two": 0, "three": 0}})
         ca = b.setdefault("crews_after", {"two": 0, "three": 0})
         sk = "three" if size == 3 else "two"
+        # max(0, …) is purely defensive — surplus_detail is derived from the same crews counted
+        # in crews_after, so this should never clamp; it just avoids a negative on any desync.
         ca[sk] = max(0, ca.get(sk, 0) - 1)
 
     # 1:1 redeploys: a surplus asset replaces a new-buy at $0.

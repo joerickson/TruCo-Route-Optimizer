@@ -244,4 +244,13 @@ assert p3["totals"]["new_crews"] == 4 and p3["totals"]["net_capital_usd"] == 440
 assert sum(a["count"] for a in p3["changes"]["additions"]) == 4, p3["changes"]
 assert p3["changes"]["redeployments"] == [] and p3["changes"]["disbanded"] == [], p3["changes"]
 
+# surplus but NO additions -> all surplus pure-downsized, 0 new, fleet shrinks
+p4 = _mk_plan([], fleet_before=32, fleet_after=32)
+_redeploy_surplus(p4, {"stg": {"two": 1, "three": 1}}, BN2, 110000)
+assert p4["totals"]["new_crews"] == 0 and p4["totals"]["net_capital_usd"] == 0, p4["totals"]
+assert p4["totals"]["fleet_after"] == 30, p4["totals"]            # 32 + 0 additions - 2 disbanded
+assert p4["changes"]["redeployments"] == [], p4["changes"]
+assert sum(d["count"] for d in p4["changes"]["disbanded"]) == 2, p4["changes"]
+assert p4["branches"]["stg"]["crews_after"] == {"two": 0, "three": 1}, p4["branches"]["stg"]
+
 print("check_recommend_plan: PASS")
