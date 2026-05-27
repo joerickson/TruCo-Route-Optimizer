@@ -76,4 +76,14 @@ _chain = [
 _clc = _branch_clusters(_chain, 40.0)                 # a-b and b-c within 40mi road; a-c is not
 assert _clc["a"] == _clc["b"] == _clc["c"], _clc      # single-linkage chains them anyway
 
+# --- cluster gating: idle crew at a far singleton branch is NOT relocated to a loaded branch ---
+by_branch = {"slc": props("slc", 200.0), "stg": props("stg", 10.0)}
+crews = [crew("a", "slc", 3), crew("b", "slc", 3), crew("idle", "stg", 3)]  # slc deficit, stg idle+far
+clusters = {"slc": "slc", "stg": "stg"}  # different clusters
+plan = _plan_fleet_changes(crews, by_branch, {"a": 52.0, "b": 52.0, "idle": 6.0}, BN, 110000,
+                           clusters=clusters)
+reloc = plan["changes"]["relocations"]
+assert not any(r["to_branch_name"] == "SLC HQ" for r in reloc), reloc  # stg crew can't cross clusters
+assert plan["branches"]["stg"]["crews_after"]["three"] == 1, plan["branches"]["stg"]  # stays at stg
+
 print("check_recommend_plan: PASS")

@@ -470,6 +470,7 @@ def _plan_fleet_changes(
     util_by_crew: dict[str, float],
     branch_name: dict[str, str],
     capex_usd: float = _REC_DEFAULT_CREW_CAPEX_USD,
+    clusters: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Capital-aware delta planner. Given the current fleet + per-branch attributed
     properties + baseline per-crew clock-hours, return the cheapest set of changes
@@ -506,6 +507,14 @@ def _plan_fleet_changes(
         return baseline_clock.get(bid, 0.0) / n if n else 0.0
 
     moved_ids: set[str] = set()
+
+    cluster_of = clusters or {}
+
+    def same_cluster(bid_a: str, bid_b: str) -> bool:
+        # No cluster map (older callers / pure tests) => unrestricted (legacy behavior).
+        if not cluster_of:
+            return True
+        return cluster_of.get(bid_a) == cluster_of.get(bid_b)
 
     def sources():  # idle crews at non-short branches (not yet moved), biggest first then name
         out = [c for c in crews if is_idle(c) and deficit(c["home_branch_id"]) <= 0 and c["id"] not in moved_ids]
@@ -550,7 +559,8 @@ def _plan_fleet_changes(
     # TIER 1: close >55 deficits, cheapest lever first.
     for bid in sorted([b for b in branch_ids if deficit(b) > 0], key=lambda b: -deficit(b)):
         while deficit(bid) > 0:
-            srcs = [s for s in sources() if s["home_branch_id"] != bid]
+            srcs = [s for s in sources()
+                    if s["home_branch_id"] != bid and same_cluster(s["home_branch_id"], bid)]
             if not srcs:
                 break
             relocate(srcs[0], bid, "deficit")
@@ -576,7 +586,8 @@ def _plan_fleet_changes(
         )
         moved = False
         for tb in targets:
-            src = next((s for s in srcs if s["home_branch_id"] != tb), None)
+            src = next((s for s in srcs
+                        if s["home_branch_id"] != tb and same_cluster(s["home_branch_id"], tb)), None)
             if src is None:
                 continue
             relocate(src, tb, "rebalance")
@@ -971,8 +982,10 @@ def run_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
         util_before = {u["crew_id"]: float(u.get("clock_hours", 0.0)) for u in baseline.get("crew_utilization", [])}
         util_before_pct = {u["crew_id"]: float(u.get("util_pct", 0.0)) for u in baseline.get("crew_utilization", [])}
 
+        clusters = _branch_clusters(branches)
         # 2) plan deltas
-        plan = _plan_fleet_changes(current_crews, by_branch, util_before, branch_name, capex_usd)
+        plan = _plan_fleet_changes(current_crews, by_branch, util_before, branch_name,
+                                   capex_usd, clusters=clusters)
 
         # attach per-branch before-util for the builder
         before_at: dict[str, list[str]] = {}
