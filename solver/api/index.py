@@ -335,9 +335,11 @@ def _branch_clusters(
 
     Two geocoded branches whose Haversine x ROAD_FACTOR distance is <= radius_miles
     join the same cluster (transitive). Branches without coordinates are each their own
-    singleton. Returns {branch_id: cluster_root_id}. Used to gate crew relocations: a crew
-    may only relocate to a branch in its own cluster (you can't run St George's routes out
-    of a Lindon depot 270 mi away).
+    singleton. Returns {branch_id: root_id} where root_id is an arbitrary but stable
+    member of the cluster — it is NOT a meaningful "main branch" label; test cluster
+    membership by equality of two branches' values, don't display the root. Used to gate
+    crew relocations: a crew may only relocate to a branch in its own cluster (you can't
+    run St George's routes out of a Lindon depot 270 mi away).
     """
     parent = {b["id"]: b["id"] for b in branches}
 

@@ -67,4 +67,13 @@ assert _cl["stg"] != _cl["slc"], _cl                   # St George alone
 assert _cl["dal"] != _cl["slc"] and _cl["dal"] != _cl["stg"], _cl
 assert _cl["nocoord"] == "nocoord", _cl                # ungeocoded -> own singleton
 
+# --- transitivity: A-B close, B-C close, A-C far -> all one cluster (single linkage) ---
+_chain = [
+    {"id": "a", "lat": 40.0000, "lng": -111.0000},
+    {"id": "b", "lat": 40.4000, "lng": -111.0000},   # ~28 mi from a
+    {"id": "c", "lat": 40.8000, "lng": -111.0000},   # ~28 mi from b, ~55 mi (road) past 60 from a
+]
+_clc = _branch_clusters(_chain, 40.0)                 # a-b and b-c within 40mi road; a-c is not
+assert _clc["a"] == _clc["b"] == _clc["c"], _clc      # single-linkage chains them anyway
+
 print("check_recommend_plan: PASS")
