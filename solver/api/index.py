@@ -710,6 +710,98 @@ def _build_recommendation(
     }
 
 
+def _apply_extra_additions(
+    plan: dict[str, Any],
+    extra: dict[str, dict[str, int]],
+    branch_name: dict[str, str],
+    capex_usd: float,
+) -> dict[str, Any]:
+    """Fold crews bought during the coverage loop back into an assembled plan dict (in place):
+    per-branch added/crews_after, changes.additions, and totals (new_crews/fleet_after/net_capital)."""
+    total_new = 0
+    for bid, sizes in extra.items():
+        b = plan["branches"].setdefault(bid, {
+            "crews_before": {"two": 0, "three": 0}, "crews_after": {"two": 0, "three": 0},
+            "relocated_in": [], "upsized": 0, "added": {"two": 0, "three": 0},
+        })
+        for size_key, size in (("two", 2), ("three", 3)):
+            n = sizes.get(size_key, 0)
+            if not n:
+                continue
+            total_new += n
+            b["added"][size_key] = b["added"].get(size_key, 0) + n
+            b["crews_after"][size_key] = b["crews_after"].get(size_key, 0) + n
+            label = branch_name.get(bid, bid)
+            row = next((a for a in plan["changes"]["additions"]
+                        if a["branch_name"] == label and a["size"] == size), None)
+            if row:
+                row["count"] += n
+            else:
+                plan["changes"]["additions"].append(
+                    {"branch_name": label, "size": size, "count": n})
+    if total_new:
+        plan["totals"]["new_crews"] += total_new
+        plan["totals"]["fleet_after"] += total_new
+        plan["totals"]["net_capital_usd"] = int(plan["totals"]["new_crews"] * float(capex_usd))
+    return plan
+
+
+def _cover_residual(
+    proposed_crews: list[dict[str, Any]],
+    by_branch: dict[str, list[dict[str, Any]]],
+    prop_labor: dict[str, float],
+    branch_name: dict[str, str],
+    validate,
+    max_rounds: int = _REC_MAX_RUNS,
+) -> tuple[dict[str, Any], dict[str, dict[str, int]], list[dict[str, Any]], int]:
+    """Close the loop between the planner's aggregate model and the real routing solve.
+
+    Validate the proposed fleet; for every routable-but-stranded property, buy a crew at the
+    property's branch (3-person if any stranded property there exceeds CAP2, else 2-person) and
+    re-validate. Stop when nothing is stranded, the round budget is spent, or a round fails to
+    reduce the unassigned count (genuinely un-routable -> surfaced as a true limit). Returns
+    (final_result, extra_additions_by_branch, proposed_crews_incl_bought, validate_count).
+    """
+    prop_branch = {p["id"]: bid for bid, props in by_branch.items() for p in props}
+    crews = list(proposed_crews)
+    extra: dict[str, dict[str, int]] = {}
+    new_idx: dict[str, int] = {}
+    validate_count = 0
+
+    if not crews:
+        return {"crew_utilization": [], "unassigned_property_ids": []}, extra, crews, 0
+
+    result = validate(crews)
+    validate_count += 1
+
+    rounds = 0
+    while rounds < max_rounds:
+        unassigned = result.get("unassigned_property_ids", []) or []
+        actionable = [pid for pid in unassigned if pid in prop_branch]
+        if not actionable:
+            break
+        prev_count = len(unassigned)
+        by_b: dict[str, list[str]] = {}
+        for pid in actionable:
+            by_b.setdefault(prop_branch[pid], []).append(pid)
+        for bid, pids in by_b.items():
+            big = any(prop_labor.get(pid, 0.0) > _REC_CAP2 for pid in pids)
+            size = 3 if big else 2
+            k = new_idx.get(bid, 0) + 1
+            new_idx[bid] = k
+            # offset index keeps these ids distinct from planner-bought rec crews
+            crews.append(_make_rec_crew(bid, 900 + k, size, branch_name.get(bid, bid)))
+            sk = "three" if size == 3 else "two"
+            extra.setdefault(bid, {})
+            extra[bid][sk] = extra[bid].get(sk, 0) + 1
+        rounds += 1
+        result = validate(crews)
+        validate_count += 1
+        if len(result.get("unassigned_property_ids", []) or []) >= prev_count:
+            break  # no improvement => remaining stranded work is genuinely un-routable
+    return result, extra, crews, validate_count
+
+
 def _classify_capacity(avg_clock_per_crew: float) -> tuple[str, str]:
     if avg_clock_per_crew < 40:
         return (

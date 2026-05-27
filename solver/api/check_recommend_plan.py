@@ -2,7 +2,7 @@
 python3 solver/api/check_recommend_plan.py   (no OR-Tools needed)."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from index import _plan_fleet_changes, _make_rec_crew, _REC_CAP2, _branch_clusters
+from index import _plan_fleet_changes, _make_rec_crew, _REC_CAP2, _branch_clusters, _apply_extra_additions, _cover_residual
 
 BN = {"slc": "SLC HQ", "stg": "St George", "lin": "Lindon"}
 
@@ -115,5 +115,44 @@ plan = _plan_fleet_changes(crews, by_branch, {"b1": 60.0, "a1": 25.0}, BN, 11000
                            clusters=clusters)
 assert plan["branches"]["stg"]["crews_after"]["two"] == 1, plan["branches"]["stg"]  # stg keeps its crew
 assert plan["totals"]["new_crews"] >= 1, plan["totals"]  # slc closed its deficit by buying, not draining stg
+
+# --- _apply_extra_additions folds loop-bought crews into an assembled plan ---
+_plan = {
+    "branches": {"slc": {"crews_before": {"two": 1, "three": 0},
+                         "crews_after": {"two": 1, "three": 0},
+                         "relocated_in": [], "upsized": 0, "added": {"two": 0, "three": 0}}},
+    "changes": {"relocations": [], "upsizes": [], "additions": [], "surplus_idle": []},
+    "totals": {"fleet_before": 1, "fleet_after": 1, "new_crews": 0,
+               "capex_usd": 110000.0, "net_capital_usd": 0},
+}
+_apply_extra_additions(_plan, {"slc": {"two": 1, "three": 1}}, {"slc": "SLC HQ"}, 110000)
+assert _plan["totals"]["new_crews"] == 2, _plan["totals"]
+assert _plan["totals"]["net_capital_usd"] == 220000, _plan["totals"]
+assert _plan["branches"]["slc"]["added"] == {"two": 1, "three": 1}, _plan["branches"]["slc"]
+assert _plan["branches"]["slc"]["crews_after"] == {"two": 2, "three": 1}, _plan["branches"]["slc"]
+assert {(a["size"], a["count"]) for a in _plan["changes"]["additions"]} == {(2, 1), (3, 1)}, _plan["changes"]
+
+# --- _cover_residual buys crews near stranded props and stops when covered ---
+_by_branch = {"slc": [{"id": "slc-a", "est_labor_hours": 90.0}, {"id": "slc-b", "est_labor_hours": 50.0}],
+              "stg": [{"id": "stg-a", "est_labor_hours": 40.0}]}
+_prop_labor = {"slc-a": 90.0, "slc-b": 50.0, "stg-a": 40.0}
+def _fake_validate(crews):
+    # round 0: slc-b stranded; after >=1 bought crew at slc, everything covered.
+    bought_at_slc = sum(1 for c in crews if str(c["id"]).startswith("rec-slc-"))
+    unassigned = [] if bought_at_slc >= 1 else ["slc-b"]
+    return {"crew_utilization": [], "unassigned_property_ids": unassigned}
+result, extra, proposed, vcount = _cover_residual(
+    [crew("a", "slc", 2)], _by_branch, _prop_labor, BN, _fake_validate, max_rounds=5)
+assert result["unassigned_property_ids"] == [], result
+assert extra.get("slc", {}).get("two", 0) >= 1, extra        # bought a 2p at slc (slc-b is < CAP2)
+assert vcount >= 2, vcount                                    # initial validate + at least one re-validate
+
+# --- _cover_residual stops (no infinite loop) when a stranded prop is genuinely un-routable ---
+def _never_covers(crews):
+    return {"crew_utilization": [], "unassigned_property_ids": ["slc-b"]}
+result2, extra2, _, vcount2 = _cover_residual(
+    [crew("a", "slc", 2)], _by_branch, _prop_labor, BN, _never_covers, max_rounds=5)
+assert result2["unassigned_property_ids"] == ["slc-b"], result2  # surfaced as a true limit
+assert vcount2 <= 3, vcount2                                     # bailed on no-improvement, not 5 rounds
 
 print("check_recommend_plan: PASS")
