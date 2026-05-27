@@ -1041,14 +1041,25 @@ def _solve_days(
     return routes_by_day, unassigned_by_day
 
 
-def run_optimization(payload: dict[str, Any], time_limit_seconds: int = 8) -> dict[str, Any]:
-    started = time.time()
-    crews = payload["crews"]
-    branches = payload["branches"]
-    properties = payload["properties"]
-
-    branches_by_id = {b["id"]: b for b in branches}
+def _optimize_subset(
+    crews: list[dict[str, Any]],
+    properties: list[dict[str, Any]],
+    branches_by_id: dict[str, dict[str, Any]],
+    time_limit_seconds: int = 8,
+    started: float | None = None,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Run the per-weekday VRP + cross-day rebalance for ONE crew/property set (a commute
+    cluster). Returns (all_routes, unassigned_chunk_ids). With no crews, every geocoded
+    property's chunks are unassigned (nobody to serve this cluster). `started` lets the caller
+    share one rebalance time-budget across all clusters (defaults to this call's start)."""
+    if started is None:
+        started = time.time()
     solver_props = _properties_for_solver(properties, crews)
+    if not solver_props:
+        return [], []
+    if not crews:
+        return [], [c["id"] for c in solver_props]
+
     day_caps = _day_capacities(crews, branches_by_id)
     buckets = _bucketize_properties(solver_props, crews, day_caps)
     work_days = sorted(buckets.keys())
@@ -1097,6 +1108,43 @@ def run_optimization(payload: dict[str, Any], time_limit_seconds: int = 8) -> di
 
     all_routes = [r for d in work_days for r in routes_by_day[d]]
     unassigned = [cid for d in work_days for cid in unassigned_by_day[d]]
+    return all_routes, unassigned
+
+
+def run_optimization(payload: dict[str, Any], time_limit_seconds: int = 8) -> dict[str, Any]:
+    """Optimize per commute cluster: a property is only ever served by crews in its own
+    cluster (Wasatch / St George / Dallas / Las Vegas), so no crew is routed across regions.
+    Within a cluster, SLC and Lindon crews share the work (pooling). Results merge and
+    aggregate once over the full crew/property lists."""
+    started = time.time()
+    crews = payload["crews"]
+    branches = payload["branches"]
+    properties = payload["properties"]
+    branches_by_id = {b["id"]: b for b in branches}
+
+    clusters = _branch_clusters(branches)
+    by_branch, unattributable = _attribute_to_branches(properties, branches)
+
+    props_by_cluster: dict[str, list[dict[str, Any]]] = {}
+    for bid, props in by_branch.items():
+        props_by_cluster.setdefault(clusters.get(bid, bid), []).extend(props)
+    crews_by_cluster: dict[str, list[dict[str, Any]]] = {}
+    for c in crews:
+        home = c.get("home_branch_id")
+        crews_by_cluster.setdefault(clusters.get(home, home), []).append(c)
+
+    all_routes: list[dict[str, Any]] = []
+    unassigned: list[str] = list(unattributable)  # ungeocoded / no active branch -> nobody can serve
+    for cl, cl_props in props_by_cluster.items():
+        cl_crews = crews_by_cluster.get(cl, [])
+        if not cl_crews:
+            unassigned.extend(p["id"] for p in cl_props)  # region has work but no crew
+            continue
+        routes, un = _optimize_subset(cl_crews, cl_props, branches_by_id,
+                                      time_limit_seconds=time_limit_seconds, started=started)
+        all_routes.extend(routes)
+        unassigned.extend(un)
+
     return _aggregate_result(crews, all_routes, unassigned, properties, time.time() - started)
 
 

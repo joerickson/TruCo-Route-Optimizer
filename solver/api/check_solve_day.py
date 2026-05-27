@@ -34,4 +34,15 @@ res3 = solve_day(1, [prop("big3", 40.40, -111.0, 24.0)], [crew("c3", size=3, max
                  time_limit_seconds=5)
 assert res3["unassigned"] == [], res3
 
+# --- total-day cap: work fits (<=10h) but work+drive exceeds max_clock + 2h -> dropped ---
+# 18 ph / 2 = 9h work (<=10); ~1.0deg north => ~3.1h round-trip drive => 12.1h total > 12h cap.
+toofar = prop("toofar", 41.00, -111.0, 18.0)
+res4 = solve_day(1, [toofar], [crew("c1", size=2, max_clock=10.0)], time_limit_seconds=5)
+assert res4["unassigned"] == ["toofar"], res4   # work-only would allow it; total-day cap drops it
+
+# --- but a moderately-far property within the ~12h total stays assigned ---
+okfar = prop("okfar", 40.40, -111.0, 18.0)       # 9h work + ~1.4h rt drive = ~10.4h <= 12h
+res5 = solve_day(1, [okfar], [crew("c1", size=2, max_clock=10.0)], time_limit_seconds=5)
+assert res5["unassigned"] == [], res5
+
 print("check_solve_day: PASS")
