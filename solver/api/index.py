@@ -465,6 +465,7 @@ def _solve_days(
     buckets: dict[int, list[dict[str, Any]]],
     crews: list[dict[str, Any]],
     branches_by_id: dict[str, dict[str, Any]],
+    time_limit_seconds: int = 8,
 ) -> tuple[dict[int, list[dict[str, Any]]], dict[int, list[str]]]:
     """Solve each given day independently. Returns ({day: routes}, {day: unassigned_chunk_ids}).
 
@@ -483,13 +484,13 @@ def _solve_days(
             routes_by_day[day] = []
             unassigned_by_day[day] = [c["id"] for c in chunks]
             continue
-        result = solve_day(day, chunks, crews_today, time_limit_seconds=8)
+        result = solve_day(day, chunks, crews_today, time_limit_seconds=time_limit_seconds)
         routes_by_day[day] = result["routes"]
         unassigned_by_day[day] = result.get("unassigned", [])
     return routes_by_day, unassigned_by_day
 
 
-def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
+def run_optimization(payload: dict[str, Any], time_limit_seconds: int = 8) -> dict[str, Any]:
     started = time.time()
     crews = payload["crews"]
     branches = payload["branches"]
@@ -503,7 +504,7 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
     chunk_by_id = {c["id"]: c for c in solver_props}
 
     # Initial solve of every day.
-    routes_by_day, unassigned_by_day = _solve_days(work_days, buckets, crews, branches_by_id)
+    routes_by_day, unassigned_by_day = _solve_days(work_days, buckets, crews, branches_by_id, time_limit_seconds=time_limit_seconds)
 
     # Bounded cross-day rebalance: move still-unassigned chunks to days with spare
     # capacity and re-solve only the changed days. A `tried` set prevents cycling;
@@ -539,7 +540,7 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
             dirty.add(target)
         if not dirty:
             break
-        re_routes, re_unassigned = _solve_days(sorted(dirty), buckets, crews, branches_by_id)
+        re_routes, re_unassigned = _solve_days(sorted(dirty), buckets, crews, branches_by_id, time_limit_seconds=time_limit_seconds)
         routes_by_day.update(re_routes)
         unassigned_by_day.update(re_unassigned)
 
@@ -548,8 +549,8 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
     return _aggregate_result(crews, all_routes, unassigned, properties, time.time() - started)
 
 
-def _supabase_patch(run_id: str, fields: dict[str, Any]) -> None:
-    """PATCH a single optimization_runs row via Supabase REST.
+def _supabase_patch(table: str, row_id: str, fields: dict[str, Any]) -> None:
+    """PATCH a single row in the given Supabase table via REST.
 
     Uses urllib.request rather than the supabase-py library because supabase-py
     2.10.0 rejects the new sb_secret_* service-role key format with "Invalid
@@ -561,7 +562,7 @@ def _supabase_patch(run_id: str, fields: dict[str, Any]) -> None:
         raise RuntimeError(f"Missing supabase env: url_set={bool(url)}, key_set={bool(key)}")
 
     req = urllib.request.Request(
-        f"{url}/rest/v1/optimization_runs?id=eq.{run_id}",
+        f"{url}/rest/v1/{table}?id=eq.{row_id}",
         method="PATCH",
         data=json.dumps(fields).encode("utf-8"),
         headers={
@@ -577,13 +578,13 @@ def _supabase_patch(run_id: str, fields: dict[str, Any]) -> None:
         raise RuntimeError(f"Supabase PATCH {e.code}: {e.read().decode()[:300]}") from None
     rows = json.loads(resp_body) if resp_body else []
     if not rows:
-        raise RuntimeError(f"Update returned no rows for run_id={run_id}")
+        raise RuntimeError(f"Update returned no rows for {table} id={row_id}")
 
 
 def _persist(run_id: str, result: dict[str, Any]) -> None:
     # Postgres needs an ISO timestamp here. Sending the literal string "now()"
     # was the silent-failure bug that left runs stuck on 'running'.
-    _supabase_patch(run_id, {
+    _supabase_patch("optimization_runs", run_id, {
         "status": result["status"],
         "solver_runtime_seconds": result["solver_runtime_seconds"],
         "total_clock_hours_per_week": result["total_clock_hours_per_week"],
@@ -623,7 +624,7 @@ class handler(BaseHTTPRequestHandler):
             err = {"status": "failed", "error": str(e), "trace": traceback.format_exc()[-500:]}
             if run_id := (locals().get("run_id")):
                 try:
-                    _supabase_patch(run_id, {
+                    _supabase_patch("optimization_runs", run_id, {
                         "status": "failed",
                         "failure_reason": str(e)[:500],
                         "completed_at": datetime.now(timezone.utc).isoformat(),
