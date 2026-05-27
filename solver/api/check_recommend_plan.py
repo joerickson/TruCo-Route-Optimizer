@@ -2,7 +2,7 @@
 python3 solver/api/check_recommend_plan.py   (no OR-Tools needed)."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from index import _plan_fleet_changes, _make_rec_crew, _REC_CAP2
+from index import _plan_fleet_changes, _make_rec_crew, _REC_CAP2, _branch_clusters
 
 BN = {"slc": "SLC HQ", "stg": "St George", "lin": "Lindon"}
 
@@ -52,5 +52,19 @@ assert plan["totals"]["new_crews"] == 0, plan["totals"]
 assert _make_rec_crew("lin", 1, 3, "Lindon")["name"] == "Lindon · 3p #1"
 plan = _plan_fleet_changes([], {"slc": props("slc", 200.0)}, {}, BN, 90000)
 assert plan["totals"]["capex_usd"] == 90000 and plan["totals"]["net_capital_usd"] == plan["totals"]["new_crews"] * 90000
+
+# --- clusters: near branches merge, far branches stay singleton ---
+_branches = [
+    {"id": "slc", "lat": 40.7608, "lng": -111.8910},  # Salt Lake City
+    {"id": "lin", "lat": 40.3416, "lng": -111.7144},  # Lindon (~30 mi from SLC)
+    {"id": "stg", "lat": 37.0965, "lng": -113.5684},  # St George (~270 mi)
+    {"id": "dal", "lat": 32.7767, "lng": -96.7970},   # Dallas (~1000+ mi)
+    {"id": "nocoord"},                                 # no lat/lng -> singleton
+]
+_cl = _branch_clusters(_branches, 60.0)
+assert _cl["slc"] == _cl["lin"], _cl                   # SLC + Lindon together
+assert _cl["stg"] != _cl["slc"], _cl                   # St George alone
+assert _cl["dal"] != _cl["slc"] and _cl["dal"] != _cl["stg"], _cl
+assert _cl["nocoord"] == "nocoord", _cl                # ungeocoded -> own singleton
 
 print("check_recommend_plan: PASS")

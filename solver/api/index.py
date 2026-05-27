@@ -41,7 +41,7 @@ from typing import Any
 # `from solver_logic import ...` raises ModuleNotFoundError at runtime.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from distance_matrix import haversine_miles
+from distance_matrix import haversine_miles, ROAD_FACTOR
 
 # Diagnostic: capture import failures so the GET health check can report them
 # instead of the function silently 500ing on invocation.
@@ -91,6 +91,7 @@ _REC_TIGHT_CLOCK_PER_WEEK = 55.0   # add-trigger ceiling (deferred-capex "tight"
 _REC_CAP2_TIGHT = _REC_USABLE_FRACTION * _REC_TIGHT_CLOCK_PER_WEEK * 2  # ~93.5
 _REC_CAP3_TIGHT = _REC_USABLE_FRACTION * _REC_TIGHT_CLOCK_PER_WEEK * 3  # ~140.25
 _REC_DEFAULT_CREW_CAPEX_USD = 110_000.0
+_REC_CLUSTER_RADIUS_MILES = 60.0  # branches within this road-distance are one commute cluster
 
 
 def _day_capacities(
@@ -325,6 +326,42 @@ def _attribute_to_branches(
         )
         by_branch[nearest["id"]].append(p)
     return by_branch, unattributable
+
+
+def _branch_clusters(
+    branches: list[dict[str, Any]], radius_miles: float = _REC_CLUSTER_RADIUS_MILES
+) -> dict[str, str]:
+    """Group branches into commute clusters by single-linkage road distance.
+
+    Two geocoded branches whose Haversine x ROAD_FACTOR distance is <= radius_miles
+    join the same cluster (transitive). Branches without coordinates are each their own
+    singleton. Returns {branch_id: cluster_root_id}. Used to gate crew relocations: a crew
+    may only relocate to a branch in its own cluster (you can't run St George's routes out
+    of a Lindon depot 270 mi away).
+    """
+    parent = {b["id"]: b["id"] for b in branches}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    geo = [b for b in branches if b.get("lat") is not None and b.get("lng") is not None]
+    for i in range(len(geo)):
+        for j in range(i + 1, len(geo)):
+            d = haversine_miles(
+                float(geo[i]["lat"]), float(geo[i]["lng"]),
+                float(geo[j]["lat"]), float(geo[j]["lng"]),
+            ) * ROAD_FACTOR
+            if d <= radius_miles:
+                union(geo[i]["id"], geo[j]["id"])
+    return {bid: find(bid) for bid in parent}
 
 
 def _make_rec_crew(branch_id: str, k: int, size: int, branch_label: str | None = None) -> dict[str, Any]:
