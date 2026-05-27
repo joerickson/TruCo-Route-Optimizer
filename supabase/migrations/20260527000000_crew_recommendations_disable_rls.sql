@@ -1,0 +1,11 @@
+-- crew_recommendations was created with Row Level Security ENABLED but no policy
+-- (likely via the Supabase dashboard, which auto-enables RLS). That silently
+-- filtered the anon client — the one the /recommend page reads with — to zero
+-- rows, so the page always showed "No recommendation yet" even though the
+-- background solver job completed and the service-role writes succeeded.
+--
+-- Every other table in this internal tool runs with RLS disabled and is read via
+-- the anon client (optimization_runs, properties, crews, branches). Match that
+-- here so the page can read its own results. The anon key is already trusted for
+-- this internal, non-customer-facing app.
+alter table public.crew_recommendations disable row level security;
