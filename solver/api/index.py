@@ -590,57 +590,51 @@ def _plan_fleet_changes(
 
 
 def _build_recommendation(
-    fleet: list[dict[str, Any]],
+    plan: dict[str, Any],
     result: dict[str, Any],
     by_branch: dict[str, list[dict[str, Any]]],
     prop_labor: dict[str, float],
     unattributable: list[str],
     branches: list[dict[str, Any]],
+    proposed_crews: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    """Assemble the recommendation payload from the final fleet + last validate result."""
+    """Assemble the delta-shape recommendation payload (see spec §5). Per-branch
+    `util_before_pct` is precomputed onto plan["branches"][bid] by run_recommendation."""
     branch_name = {b["id"]: b.get("name", b["id"]) for b in branches}
-    util_by_crew = {u["crew_id"]: u for u in result.get("crew_utilization", [])}
-    crews_by_branch: dict[str, list[dict[str, Any]]] = {}
-    for c in fleet:
-        crews_by_branch.setdefault(c["home_branch_id"], []).append(c)
+    util_after = {u["crew_id"]: float(u.get("util_pct", 0.0)) for u in result.get("crew_utilization", [])}
+    crews_after_at: dict[str, list[str]] = {}
+    for c in proposed_crews:
+        crews_after_at.setdefault(c["home_branch_id"], []).append(c["id"])
 
-    branches_out: list[dict[str, Any]] = []
-    tot2 = tot3 = 0
-    for branch_id, props in by_branch.items():
-        crews = crews_by_branch.get(branch_id, [])
-        two = sum(1 for c in crews if c["crew_size"] == 2)
-        three = sum(1 for c in crews if c["crew_size"] == 3)
-        tot2 += two
-        tot3 += three
-        demand = sum(float(p["est_labor_hours"]) for p in props)
-        utils = [float(util_by_crew.get(c["id"], {}).get("util_pct", 0.0)) for c in crews]
-        drivers = [p["name"] for p in props if _REC_CAP2 < float(p["est_labor_hours"]) <= _REC_CAP3]
-        splits = [p["name"] for p in props if float(p["est_labor_hours"]) > _REC_CAP3]
+    def avg(vals): return round(sum(vals) / len(vals), 1) if vals else 0.0
+
+    branches_out = []
+    for bid, props in by_branch.items():
+        pb = plan["branches"].get(bid, {})
+        after_ids = crews_after_at.get(bid, [])
         branches_out.append({
-            "branch_id": branch_id,
-            "branch_name": branch_name.get(branch_id, branch_id),
-            "two_person": two,
-            "three_person": three,
-            "total_people": two * 2 + three * 3,
-            "demand_hours": round(demand, 1),
-            "avg_util_pct": round(sum(utils) / len(utils), 1) if utils else 0.0,
-            "drivers_three_person": drivers,
-            "split_properties": splits,
+            "branch_id": bid,
+            "branch_name": branch_name.get(bid, bid),
+            "demand_hours": round(sum(float(p["est_labor_hours"]) for p in props), 1),
+            "crews_before": pb.get("crews_before", {"two": 0, "three": 0}),
+            "crews_after": pb.get("crews_after", {"two": 0, "three": 0}),
+            "util_before_pct": pb.get("util_before_pct", 0.0),
+            "util_after_pct": avg([util_after.get(cid, 0.0) for cid in after_ids]),
+            "relocated_in": pb.get("relocated_in", []),
+            "upsized": pb.get("upsized", 0),
+            "added": pb.get("added", {"two": 0, "three": 0}),
+            "drivers_three_person": [p["name"] for p in props if _REC_CAP2 < float(p["est_labor_hours"]) <= _REC_CAP3],
+            "split_properties": [p["name"] for p in props if float(p["est_labor_hours"]) > _REC_CAP3],
         })
 
     unassigned_ids = result.get("unassigned_property_ids", []) or []
-    residual_hours = sum(prop_labor.get(pid, 0.0) for pid in unassigned_ids)
     return {
         "branches": branches_out,
-        "totals": {
-            "two_person": tot2,
-            "three_person": tot3,
-            "total_crews": tot2 + tot3,
-            "total_people": tot2 * 2 + tot3 * 3,
-            "demand_hours": round(sum(prop_labor.values()), 1),
-        },
+        "changes": plan["changes"],
+        "totals": {**plan["totals"], "demand_hours": round(sum(prop_labor.values()), 1)},
         "unattributable_property_ids": unattributable,
-        "residual_unassigned": {"count": len(unassigned_ids), "labor_hours": round(residual_hours, 1)},
+        "residual_unassigned": {"count": len(unassigned_ids),
+                                "labor_hours": round(sum(prop_labor.get(pid, 0.0) for pid in unassigned_ids), 1)},
     }
 
 
@@ -912,63 +906,96 @@ def run_optimization(payload: dict[str, Any], time_limit_seconds: int = 8) -> di
 
 
 def run_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
-    """recommend mode: analytical seed -> validate with run_optimization -> bounded
-    add/trim loop -> write result to crew_recommendations."""
+    """recommend mode: baseline validate -> capital-aware plan -> proposed validate
+    (+ bounded refine) -> persist what-if run + delta recommendation."""
     started = time.time()
     rec_id = payload.get("recommendation_id")
     branches = payload["branches"]
     properties = payload["properties"]
+    current_crews = payload.get("crews", [])
+    capex_usd = float(payload.get("capex_usd") or _REC_DEFAULT_CREW_CAPEX_USD)
+    target_week = payload.get("target_week")
+    rec_name = payload.get("name") or "Fleet recommendation"
     try:
         by_branch, unattributable = _attribute_to_branches(properties, branches)
-        prop_branch = {p["id"]: b_id for b_id, props in by_branch.items() for p in props}
         prop_labor = {p["id"]: float(p["est_labor_hours"]) for p in properties}
+        branch_name = {b["id"]: b.get("name", b["id"]) for b in branches}
 
-        fleet = _seed_fleet(properties, branches)
-        next_idx: dict[str, int] = {}
-
-        def validate(crews: list[dict[str, Any]]) -> dict[str, Any]:
+        def validate(crews):
             return run_optimization(
                 {"crews": crews, "branches": branches, "properties": properties},
                 time_limit_seconds=_REC_VALIDATE_SECONDS,
             )
 
-        result = validate(fleet)
-        iterations = 1
-        for _round in range(_REC_MAX_RUNS - 1):
-            if (time.time() - started) > _REC_TIME_CAP_SECONDS:
-                break
-            adds, removes = _recommend_adjustments(
-                fleet, result["crew_utilization"], result["unassigned_property_ids"], prop_branch, prop_labor
-            )
-            if not adds and not removes:
-                break
-            if removes:
-                rm = set(removes)
-                fleet = [c for c in fleet if c["id"] not in rm]
-            for branch_id, size in adds:
-                # start added-crew indices well above the seed fleet's 1-based ids to avoid collisions
-                k = next_idx.get(branch_id, 1000) + 1
-                next_idx[branch_id] = k
-                fleet.append(_make_rec_crew(branch_id, k, size))
-            result = validate(fleet)
-            iterations += 1
+        # 1) baseline: current fleet -> per-crew clock + avg per branch
+        baseline = validate(current_crews) if current_crews else {"crew_utilization": []}
+        util_before = {u["crew_id"]: float(u["clock_hours"]) for u in baseline.get("crew_utilization", [])}
+        util_before_pct = {u["crew_id"]: float(u.get("util_pct", 0.0)) for u in baseline.get("crew_utilization", [])}
 
-        rec = _build_recommendation(fleet, result, by_branch, prop_labor, unattributable, branches)
+        # 2) plan deltas
+        plan = _plan_fleet_changes(current_crews, by_branch, util_before, branch_name, capex_usd)
+
+        # attach per-branch before-util for the builder
+        before_at: dict[str, list[str]] = {}
+        for c in current_crews:
+            before_at.setdefault(c["home_branch_id"], []).append(c["id"])
+        for bid in by_branch:
+            ids = before_at.get(bid, [])
+            vals = [util_before_pct.get(cid, 0.0) for cid in ids]
+            plan["branches"].setdefault(bid, {})["util_before_pct"] = round(sum(vals) / len(vals), 1) if vals else 0.0
+
+        # 3) validate proposed fleet (+ bounded refine handled by the planner's tight caps;
+        #    one validate is sufficient — the planner already sizes to the 55h ceiling).
+        proposed = plan["proposed_crews"]
+        result = validate(proposed) if proposed else baseline
+        iterations = (1 if current_crews else 0) + (1 if proposed else 0)
+
+        # 4) persist what-if run, link it
+        run_id = None
+        if target_week and proposed:
+            try:
+                run_id = _supabase_insert("optimization_runs", {
+                    "name": f"What-if: {rec_name}",
+                    "run_kind": "what_if",
+                    "target_week_start_date": target_week,
+                    "active_branch_ids": [b["id"] for b in branches],
+                    "active_property_ids": [p["id"] for p in properties],
+                    "status": "completed",
+                    "solver_runtime_seconds": result.get("solver_runtime_seconds"),
+                    "total_clock_hours_per_week": result.get("total_clock_hours_per_week"),
+                    "total_labor_hours_per_week": result.get("total_labor_hours_per_week"),
+                    "total_drive_hours_per_week": result.get("total_drive_hours_per_week"),
+                    "total_drive_miles_per_week": result.get("total_drive_miles_per_week"),
+                    "crew_utilization": result.get("crew_utilization"),
+                    "capacity_recommendation": result.get("capacity_recommendation"),
+                    "recommendation_text": result.get("recommendation_text"),
+                    "routes_jsonb": result.get("routes_jsonb"),
+                    "unassigned_property_ids": result.get("unassigned_property_ids"),
+                    "started_at": datetime.now(timezone.utc).isoformat(),
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                run_id = None  # best-effort link
+
+        rec = _build_recommendation(plan, result, by_branch, prop_labor, unattributable,
+                                     branches, proposed)
         if rec_id:
-            _supabase_patch("crew_recommendations", rec_id, {
+            fields = {
                 "status": "completed",
                 "result_jsonb": rec,
                 "iterations": iterations,
                 "solver_runtime_seconds": round(time.time() - started, 1),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
-            })
-        return {"status": "completed", "iterations": iterations, **rec}
+            }
+            if run_id:
+                fields["optimization_run_id"] = run_id
+            _supabase_patch("crew_recommendations", rec_id, fields)
+        return {"status": "completed", "iterations": iterations, "optimization_run_id": run_id, **rec}
     except Exception as e:
         if rec_id:
             try:
                 _supabase_patch("crew_recommendations", rec_id, {
-                    "status": "failed",
-                    "failure_reason": str(e)[:500],
+                    "status": "failed", "failure_reason": str(e)[:500],
                     "completed_at": datetime.now(timezone.utc).isoformat(),
                 })
             except Exception:
@@ -1006,6 +1033,31 @@ def _supabase_patch(table: str, row_id: str, fields: dict[str, Any]) -> None:
     rows = json.loads(resp_body) if resp_body else []
     if not rows:
         raise RuntimeError(f"Update returned no rows for {table} id={row_id}")
+
+
+def _supabase_insert(table: str, row: dict[str, Any]) -> str:
+    """INSERT one row via REST, returning its id. Mirrors _supabase_patch's auth/error handling."""
+    url = os.environ.get("NEXT_PUBLIC_SUPABASE_URL") or os.environ.get("SUPABASE_URL")
+    key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY")
+    if not url or not key:
+        raise RuntimeError(f"Missing supabase env: url_set={bool(url)}, key_set={bool(key)}")
+    req = urllib.request.Request(
+        f"{url}/rest/v1/{table}",
+        method="POST",
+        data=json.dumps(row).encode("utf-8"),
+        headers={
+            "apikey": key, "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json", "Prefer": "return=representation",
+        },
+    )
+    try:
+        resp_body = urllib.request.urlopen(req, timeout=10).read().decode()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Supabase INSERT {e.code}: {e.read().decode()[:300]}") from None
+    rows = json.loads(resp_body) if resp_body else []
+    if not rows:
+        raise RuntimeError(f"Insert returned no rows for {table}")
+    return rows[0]["id"]
 
 
 def _persist(run_id: str, result: dict[str, Any]) -> None:
