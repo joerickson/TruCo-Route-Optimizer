@@ -5,27 +5,25 @@ import type { Branch, Crew, Property } from '@/lib/types';
 
 const PYTHON_SOLVER_URL = process.env.PYTHON_SOLVER_URL ?? '';
 
-export async function startOptimization(formData: FormData) {
+export async function startOptimization(
+  formData: FormData
+): Promise<{ ok: true; run_id: string } | { ok: false; error: string }> {
   const targetWeek = String(formData.get('target_week_start_date') ?? '').trim();
   const name = String(formData.get('name') ?? '').trim() || `Run ${new Date().toISOString().slice(0, 16)}`;
   if (!targetWeek) return { ok: false, error: 'target_week_start_date required' };
+  return launchOptimization(name, targetWeek);
+}
 
+export async function launchOptimization(
+  name: string,
+  targetWeek: string
+): Promise<{ ok: true; run_id: string } | { ok: false; error: string }> {
   const supabase = getServiceClient();
 
   const [{ data: crewsData }, { data: branchesData }, { data: propsData }] = await Promise.all([
     supabase.from('crews').select('*').eq('is_active', true),
-    supabase
-      .from('branches')
-      .select('*')
-      .eq('is_active', true)
-      .not('lat', 'is', null)
-      .not('lng', 'is', null),
-    supabase
-      .from('properties')
-      .select('*')
-      .eq('is_active', true)
-      .not('lat', 'is', null)
-      .not('lng', 'is', null),
+    supabase.from('branches').select('*').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
+    supabase.from('properties').select('*').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
   ]);
 
   const crews = (crewsData ?? []) as Crew[];
