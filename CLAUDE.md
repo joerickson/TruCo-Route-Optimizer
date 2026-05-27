@@ -14,17 +14,17 @@ The two questions it answers:
 
 - **Web**: Next.js 14 (App Router), TypeScript, Tailwind, shadcn/ui (hand-rolled primitives in `src/components/ui/`)
 - **DB**: Supabase Postgres
-- **Solver**: Python serverless function on Vercel under `solver/` (a separate Vercel project rooted at the `solver/` directory of this repo). OR-Tools VRP. Web app calls it via `PYTHON_SOLVER_URL` env var.
+- **Solver**: Python service on Coolify under `solver/` (a separate Coolify app rooted at the `solver/` directory of this repo). OR-Tools VRP. Web app calls it via `PYTHON_SOLVER_URL` env var.
 - **Maps**: Mapbox GL JS (rendering), Google Maps API (geocoding)
-- **Deploy**: Vercel (Pro for the 300s function timeout the solver needs)
+- **Deploy**: Coolify — web app and solver are **separate Coolify apps** on this repo. **Both are redeployed manually in Coolify today** (a push to `origin/main` does not auto-deploy yet — see if a deploy webhook is wired). The solver runs as a long-running container (no serverless function timeout).
 
 ## Critical conventions
 
 - **DB access**: server → service-role client (`getServiceClient()`); client/RSC → anon client. Service key never ships to the browser.
-- **Python solver lives in a separate Vercel project**: rooted at `solver/` in this repo. Reason: Next.js's App Router claims the entire `/api/*` namespace at the routing layer when any `app/api/*` route exists, which shadows top-level `/api/*.py` Python functions. Two Vercel projects on the same repo (web + solver, distinguished by Root Directory) is the documented pattern. Web app calls solver via `PYTHON_SOLVER_URL` env var (full URL incl. `/api/solver` path). The solver project needs Supabase env vars to write back results.
+- **Python solver lives in a separate Coolify app**: rooted at `solver/` in this repo. Reason: Next.js's App Router claims the entire `/api/*` namespace at the routing layer when any `app/api/*` route exists, which would shadow top-level `/api/*.py` Python functions — so the solver can't share the web deployment. Two separate Coolify apps on the same repo (web + solver, distinguished by base/root directory) is the pattern. Web app calls solver via `PYTHON_SOLVER_URL` env var. The solver app needs Supabase env vars to write back results.
 - **Migrations**: live in `supabase/migrations/`, run via `supabase db push` — **never auto-applied**. When adding a migration, **always include the paste-ready SQL in the response** so the user can run it before the next deploy.
 - **Spreadsheets**: parse with `xlsx` (SheetJS). The Aspire export is xlsx; CSV path also exists in `src/lib/csv-import.ts` and shares field-mapping logic.
-- **Env vars**: `.env.local` for dev, Vercel dashboard for prod. See `.env.example` for the canonical list.
+- **Env vars**: `.env.local` for dev, Coolify (per-app env) for prod. See `.env.example` for the canonical list.
 - **ESLint**: pinned to `^8.57.0`. `eslint-config-next@14` is not compatible with ESLint 9 yet — don't bump.
 - **Server actions returning `{ ok, error }`** can't be passed directly to `<form action={...}>` (React types it as void-returning). Wrap in a client component using `useTransition`. See `branches/branch-form.tsx` and `optimize/optimize-form.tsx` for the pattern.
 - **Mapbox**: lazy-loaded via `next/dynamic({ ssr: false })` so the bundle only ships when `?view=map`. Don't statically import `mapbox-gl` from a server-rendered code path.
