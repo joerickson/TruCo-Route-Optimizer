@@ -87,6 +87,10 @@ _REC_OVER_PROVISIONED_CLOCK = 40.0  # a crew under this weekly clock is under-us
 _REC_MAX_RUNS = 5
 _REC_TIME_CAP_SECONDS = 600
 _REC_VALIDATE_SECONDS = 5
+_REC_TIGHT_CLOCK_PER_WEEK = 55.0   # add-trigger ceiling (deferred-capex "tight" band)
+_REC_CAP2_TIGHT = _REC_USABLE_FRACTION * _REC_TIGHT_CLOCK_PER_WEEK * 2  # ~93.5
+_REC_CAP3_TIGHT = _REC_USABLE_FRACTION * _REC_TIGHT_CLOCK_PER_WEEK * 3  # ~140.25
+_REC_DEFAULT_CREW_CAPEX_USD = 110_000.0
 
 
 def _day_capacities(
@@ -323,21 +327,18 @@ def _attribute_to_branches(
     return by_branch, unattributable
 
 
-def _make_rec_crew(branch_id: str, k: int, size: int) -> dict[str, Any]:
+def _make_rec_crew(branch_id: str, k: int, size: int, branch_label: str | None = None) -> dict[str, Any]:
     """A synthetic Mon-Fri crew at a branch, shaped for run_optimization."""
+    label = branch_label or branch_id
     return {
         "id": f"rec-{branch_id}-{k}",
-        "name": f"Rec crew {k} ({size}p)",
+        "name": f"{label} · {size}p #{k}",
         "crew_size": size,
         "home_branch_id": branch_id,
         "max_clock_hours_per_day": _REC_MAX_HOURS_PER_DAY,
-        "works_monday": True,
-        "works_tuesday": True,
-        "works_wednesday": True,
-        "works_thursday": True,
-        "works_friday": True,
-        "works_saturday": False,
-        "works_sunday": False,
+        "works_monday": True, "works_tuesday": True, "works_wednesday": True,
+        "works_thursday": True, "works_friday": True,
+        "works_saturday": False, "works_sunday": False,
     }
 
 
@@ -422,6 +423,163 @@ def _recommend_adjustments(
                 removes.append(least["id"])
 
     return adds, removes
+
+
+def _plan_fleet_changes(
+    current_crews: list[dict[str, Any]],
+    by_branch: dict[str, list[dict[str, Any]]],
+    util_by_crew: dict[str, float],
+    branch_name: dict[str, str],
+    capex_usd: float,
+) -> dict[str, Any]:
+    """Capital-aware delta planner. Given the current fleet + per-branch attributed
+    properties + baseline per-crew clock-hours, return the cheapest set of changes
+    (relocate $0 -> upsize 2->3 labor-only -> buy $110k) to bring each branch within
+    the ~55 clock-h/wk tight ceiling, then rebalance remaining idle crews toward the
+    most-loaded branches. Returns {proposed_crews, branches, changes, totals}.
+
+    MIRRORS the lever order/caps of src/lib/unassigned-fix.ts (TS, web) on purpose;
+    different runtimes (this needs the solver's background-job loop). Keep in sync.
+    """
+    # Working copy of the fleet (mutable home_branch_id / crew_size).
+    crews = [dict(c, crew_size=int(c.get("crew_size") or 2)) for c in current_crews]
+    branch_ids = list(by_branch.keys())
+    crews_at: dict[str, list[dict[str, Any]]] = {bid: [] for bid in branch_ids}
+    for c in crews:
+        crews_at.setdefault(c["home_branch_id"], []).append(c)
+
+    demand = {bid: sum(float(p["est_labor_hours"]) for p in props) for bid, props in by_branch.items()}
+    baseline_clock: dict[str, float] = {}
+    for c in current_crews:
+        baseline_clock[c["home_branch_id"]] = baseline_clock.get(c["home_branch_id"], 0.0) + util_by_crew.get(c["id"], 0.0)
+
+    def cap_of(c): return _REC_CAP3_TIGHT if c["crew_size"] == 3 else _REC_CAP2_TIGHT
+    def branch_cap(bid): return sum(cap_of(c) for c in crews_at.get(bid, []))
+    def deficit(bid): return demand.get(bid, 0.0) - branch_cap(bid)
+    def has_big(bid): return any(float(p["est_labor_hours"]) > _REC_CAP2 for p in by_branch.get(bid, []))
+    def has_three(bid): return any(c["crew_size"] == 3 for c in crews_at.get(bid, []))
+    def is_idle(c): return util_by_crew.get(c["id"], 0.0) < _REC_OVER_PROVISIONED_CLOCK
+    def est_avg(bid):
+        n = len(crews_at.get(bid, []))
+        return baseline_clock.get(bid, 0.0) / n if n else 0.0
+
+    def sources():  # idle crews at non-short branches, biggest first then name
+        out = [c for c in crews if is_idle(c) and deficit(c["home_branch_id"]) <= 0]
+        out.sort(key=lambda c: (-cap_of(c), c.get("name", "")))
+        return out
+
+    relocations: list[dict[str, Any]] = []
+    upsizes: dict[str, int] = {}
+    additions: dict[tuple[str, int], int] = {}
+    new_idx: dict[str, int] = {}
+
+    def relocate(c, to_bid, reason):
+        frm = c["home_branch_id"]
+        crews_at[frm].remove(c)
+        c["home_branch_id"] = to_bid
+        crews_at.setdefault(to_bid, []).append(c)
+        relocations.append({
+            "crew_name": c.get("name", c["id"]),
+            "from_branch_name": branch_name.get(frm, frm),
+            "to_branch_name": branch_name.get(to_bid, to_bid),
+            "reason": reason,
+        })
+
+    def upsize(bid):
+        twos = [c for c in crews_at[bid] if c["crew_size"] == 2]
+        if not twos:
+            return False
+        twos[0]["crew_size"] = 3
+        upsizes[bid] = upsizes.get(bid, 0) + 1
+        return True
+
+    def buy(bid, size):
+        k = new_idx.get(bid, 0) + 1
+        new_idx[bid] = k
+        nc = _make_rec_crew(bid, k, size, branch_name.get(bid, bid))
+        crews.append(nc)
+        crews_at[bid].append(nc)
+        additions[(bid, size)] = additions.get((bid, size), 0) + 1
+
+    # TIER 1: close >55 deficits, cheapest lever first.
+    for bid in sorted([b for b in branch_ids if deficit(b) > 0], key=lambda b: -deficit(b)):
+        while deficit(bid) > 0:
+            srcs = [s for s in sources() if s["home_branch_id"] != bid]
+            if not srcs:
+                break
+            relocate(srcs[0], bid, "deficit")
+        while deficit(bid) > 0 and upsize(bid):
+            pass
+        while deficit(bid) > 0:
+            buy(bid, 3 if (has_big(bid) and not has_three(bid)) else 2)
+
+    # Big-property feasibility: every branch with a >CAP2 property needs a 3-person crew.
+    for bid in branch_ids:
+        if has_big(bid) and not has_three(bid):
+            if not upsize(bid):
+                buy(bid, 3)
+
+    # TIER 2: rebalance remaining idle crews toward most-loaded branches still > 50.
+    while True:
+        srcs = sources()
+        if not srcs:
+            break
+        targets = sorted(
+            [b for b in branch_ids if est_avg(b) > _REC_SUSTAINABLE_CLOCK_PER_WEEK],
+            key=lambda b: -est_avg(b),
+        )
+        moved = False
+        for tb in targets:
+            src = next((s for s in srcs if s["home_branch_id"] != tb), None)
+            if src is None:
+                continue
+            relocate(src, tb, "rebalance")
+            moved = True
+            break
+        if not moved:
+            break
+
+    # Surplus: idle crews with no beneficial target (flagged, never disbanded).
+    surplus: dict[str, int] = {}
+    for s in sources():
+        surplus[s["home_branch_id"]] = surplus.get(s["home_branch_id"], 0) + 1
+
+    # --- assemble output ---
+    def counts(crew_list):
+        return {"two": sum(1 for c in crew_list if c["crew_size"] == 2),
+                "three": sum(1 for c in crew_list if c["crew_size"] == 3)}
+
+    before_at: dict[str, list[dict[str, Any]]] = {}
+    for c in current_crews:
+        before_at.setdefault(c["home_branch_id"], []).append(c)
+
+    branches_out: dict[str, Any] = {}
+    for bid in branch_ids:
+        relocated_in = [r["crew_name"] for r in relocations if r["to_branch_name"] == branch_name.get(bid, bid)]
+        added = {"two": additions.get((bid, 2), 0), "three": additions.get((bid, 3), 0)}
+        branches_out[bid] = {
+            "crews_before": counts(before_at.get(bid, [])),
+            "crews_after": counts(crews_at.get(bid, [])),
+            "relocated_in": relocated_in,
+            "upsized": upsizes.get(bid, 0),
+            "added": added,
+        }
+
+    new_crews = sum(additions.values())
+    changes = {
+        "relocations": relocations,
+        "upsizes": [{"branch_name": branch_name.get(b, b), "count": n} for b, n in upsizes.items()],
+        "additions": [{"branch_name": branch_name.get(b, b), "size": s, "count": n} for (b, s), n in additions.items()],
+        "surplus_idle": [{"branch_name": branch_name.get(b, b), "count": n} for b, n in surplus.items()],
+    }
+    totals = {
+        "fleet_before": len(current_crews),
+        "fleet_after": len(crews),
+        "new_crews": new_crews,
+        "capex_usd": float(capex_usd),
+        "net_capital_usd": int(new_crews * float(capex_usd)),
+    }
+    return {"proposed_crews": crews, "branches": branches_out, "changes": changes, "totals": totals}
 
 
 def _build_recommendation(
