@@ -195,6 +195,32 @@ assert extra5.get("good", {}).get("two", 0) == 2, extra5    # good keeps the 2 c
 assert "bad" not in extra5, extra5                          # bad's probe didn't help -> rolled back, 0 added
 assert result5["unassigned_property_ids"] == ["b1"], result5  # un-routable work surfaced, not chased
 
+# --- cluster rebalance: a deficit branch is covered by relocating a same-cluster branch's
+#     SLACK (busy-not-idle) crews before buying, when the cluster has the total capacity ---
+by_branch = {"slc": props("slc", 100.0), "lin": props("lin", 300.0)}
+crews = [crew("s1", "slc", 3), crew("s2", "slc", 3), crew("s3", "slc", 3), crew("s4", "slc", 3),
+         crew("l1", "lin", 2)]
+clusters = {"slc": "wf", "lin": "wf"}                      # SLC + Lindon = one cluster
+util = {"s1": 55, "s2": 55, "s3": 55, "s4": 55, "l1": 58}  # SLC crews busy (not idle); branch has slack
+plan = _plan_fleet_changes(crews, by_branch, util, {"slc": "SLC", "lin": "Lindon"}, 110000,
+                           clusters=clusters)
+assert any(r["to_branch_name"] == "Lindon" and r["reason"] == "deficit"
+           for r in plan["changes"]["relocations"]), plan["changes"]   # SLC slack -> Lindon
+assert plan["totals"]["new_crews"] == 0, plan["totals"]                # cluster had capacity; no buy
+
+# --- cluster genuinely short: relocate ALL the donor's slack, THEN buy the remainder ---
+# SLC (4×3p, cap 561, demand 200) can spare 2 crews (down to 281 ≥ 200); Lindon (1×2p, demand 500)
+# gets those 2 relocated, then the residual deficit is upsized/bought.
+by_branch = {"slc": props("slc", 200.0), "lin": props("lin", 500.0)}
+crews = [crew("s1", "slc", 3), crew("s2", "slc", 3), crew("s3", "slc", 3), crew("s4", "slc", 3),
+         crew("l1", "lin", 2)]
+util = {"s1": 55, "s2": 55, "s3": 55, "s4": 55, "l1": 58}  # all busy (not idle)
+plan = _plan_fleet_changes(crews, by_branch, util, {"slc": "SLC", "lin": "Lindon"}, 110000,
+                           clusters={"slc": "wf", "lin": "wf"})
+assert any(r["to_branch_name"] == "Lindon" and r["reason"] == "deficit"
+           for r in plan["changes"]["relocations"]), plan["changes"]   # drained SLC's slack first
+assert plan["totals"]["new_crews"] >= 1, plan["totals"]                # then bought the remainder
+
 # --- _redeploy_surplus: surplus assets fund additions ($0) before counting new capital ---
 def _mk_plan(additions, fleet_before, fleet_after, capex=110000):
     return {
