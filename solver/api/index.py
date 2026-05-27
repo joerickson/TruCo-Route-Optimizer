@@ -1046,11 +1046,14 @@ def _optimize_subset(
     properties: list[dict[str, Any]],
     branches_by_id: dict[str, dict[str, Any]],
     time_limit_seconds: int = 8,
+    started: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     """Run the per-weekday VRP + cross-day rebalance for ONE crew/property set (a commute
     cluster). Returns (all_routes, unassigned_chunk_ids). With no crews, every geocoded
-    property's chunks are unassigned (nobody to serve this cluster)."""
-    started = time.time()
+    property's chunks are unassigned (nobody to serve this cluster). `started` lets the caller
+    share one rebalance time-budget across all clusters (defaults to this call's start)."""
+    if started is None:
+        started = time.time()
     solver_props = _properties_for_solver(properties, crews)
     if not solver_props:
         return [], []
@@ -1137,7 +1140,8 @@ def run_optimization(payload: dict[str, Any], time_limit_seconds: int = 8) -> di
         if not cl_crews:
             unassigned.extend(p["id"] for p in cl_props)  # region has work but no crew
             continue
-        routes, un = _optimize_subset(cl_crews, cl_props, branches_by_id, time_limit_seconds=time_limit_seconds)
+        routes, un = _optimize_subset(cl_crews, cl_props, branches_by_id,
+                                      time_limit_seconds=time_limit_seconds, started=started)
         all_routes.extend(routes)
         unassigned.extend(un)
 
