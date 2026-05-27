@@ -534,6 +534,18 @@ def _plan_fleet_changes(
         out.sort(key=lambda c: (-cap_of(c), c.get("name", "")))
         return out
 
+    def slack_sources():
+        # Crews a non-short branch can SPARE while still covering its own demand (keeps_coverage),
+        # even if busy (not idle). Lets a same-cluster branch with structural slack (e.g. SLC) cover
+        # another's deficit (e.g. Lindon) by relocation before buying — the cluster is one routing
+        # pool. Idle crews go first (cheapest to move), then least-utilized, then smaller, then name.
+        out = [c for c in crews
+               if deficit(c["home_branch_id"]) <= 0
+               and c["id"] not in moved_ids and keeps_coverage(c)]
+        out.sort(key=lambda c: (0 if is_idle(c) else 1, util_by_crew.get(c["id"], 0.0),
+                                cap_of(c), c.get("name", "")))
+        return out
+
     relocations: list[dict[str, Any]] = []
     upsizes: dict[str, int] = {}
     additions: dict[tuple[str, int], int] = {}
@@ -569,10 +581,13 @@ def _plan_fleet_changes(
         crews_at[bid].append(nc)
         additions[(bid, size)] = additions.get((bid, size), 0) + 1
 
-    # TIER 1: close >55 deficits, cheapest lever first.
+    # TIER 1: close >55 deficits, cheapest lever first. Relocation draws from same-cluster
+    # branches that can SPARE a crew (slack), not just idle ones — so a cluster with enough
+    # total capacity (e.g. Wasatch: SLC slack covers Lindon's deficit) rebalances at $0 before
+    # any buy. A buy only happens once the whole cluster's slack is exhausted.
     for bid in sorted([b for b in branch_ids if deficit(b) > 0], key=lambda b: -deficit(b)):
         while deficit(bid) > 0:
-            srcs = [s for s in sources()
+            srcs = [s for s in slack_sources()
                     if s["home_branch_id"] != bid and same_cluster(s["home_branch_id"], bid)]
             if not srcs:
                 break
