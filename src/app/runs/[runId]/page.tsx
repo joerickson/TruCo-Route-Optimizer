@@ -14,8 +14,9 @@ import { RoutesMapLoader } from './routes-map-loader';
 import { RunCalendar } from './run-calendar';
 import { buildCalendarGrid, type CrewAvailability } from '@/lib/calendar-grid';
 import type { RoutesMapCrew, RoutesMapDepot, RoutesMapUnassigned } from './routes-map';
-import { UnassignedBanner, UnassignedCard } from './run-unassigned';
+import { UnassignedBanner, UnassignedCard, UnassignedFix } from './run-unassigned';
 import { computePropertyCoverage, summarizeUnassigned, type UnassignedProp, type UnassignedSummary } from '@/lib/property-coverage';
+import { planUnassignedFix, type FixPlan, type FixUnassignedProp, type FixBranch, type FixCrew } from '@/lib/unassigned-fix';
 
 export const dynamic = 'force-dynamic';
 
@@ -49,6 +50,7 @@ export default async function RunPage({
 
   const unassignedSummary =
     run.status === 'completed' ? await loadUnassignedSummary(supabase, run) : null;
+  const fixPlan = run.status === 'completed' ? await loadFixPlan(supabase, run) : null;
   const underUtilizedCrews = (run.crew_utilization ?? []).filter((c) => c.clock_hours > 0 && c.clock_hours < 40).length;
 
   return (
@@ -121,7 +123,7 @@ export default async function RunPage({
         ) : view === 'calendar' ? (
           <RunCalendarView run={run} crewMeta={crewMeta} />
         ) : (
-          <CompletedRun run={run} crewMeta={crewMeta} unassigned={unassignedSummary} />
+          <CompletedRun run={run} crewMeta={crewMeta} unassigned={unassignedSummary} fixPlan={fixPlan} />
         ))}
     </div>
   );
@@ -208,6 +210,50 @@ async function loadUnassignedSummary(
 
   const coverage = computePropertyCoverage(routes, crewSizeById);
   return summarizeUnassigned(props, coverage);
+}
+
+async function loadFixPlan(
+  supabase: ReturnType<typeof getServerClient>,
+  run: OptimizationRun
+): Promise<FixPlan | null> {
+  const unassignedIds = run.unassigned_property_ids ?? [];
+  if (unassignedIds.length === 0) return null;
+
+  const [{ data: propRows }, { data: branchRows }, { data: crewRows }] = await Promise.all([
+    supabase.from('properties').select('id, name, est_labor_hours, preferred_branch_id, lat, lng').in('id', unassignedIds),
+    supabase.from('branches').select('id, name, lat, lng').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
+    supabase.from('crews').select('id, name, crew_size, home_branch_id').eq('is_active', true),
+  ]);
+
+  const unassigned: FixUnassignedProp[] = (
+    (propRows ?? []) as Array<{
+      id: string; name: string; est_labor_hours: number | string | null;
+      preferred_branch_id: string | null; lat: number | string | null; lng: number | string | null;
+    }>
+  ).map((p) => ({
+    id: p.id,
+    name: p.name,
+    est_labor_hours: Number(p.est_labor_hours) || 0,
+    preferred_branch_id: p.preferred_branch_id ?? null,
+    lat: p.lat == null ? null : Number(p.lat),
+    lng: p.lng == null ? null : Number(p.lng),
+  }));
+  const branches: FixBranch[] = (
+    (branchRows ?? []) as Array<{ id: string; name: string; lat: number | string; lng: number | string }>
+  ).map((b) => ({ id: b.id, name: b.name, lat: Number(b.lat), lng: Number(b.lng) }));
+  const clockByCrew: Record<string, number> = {};
+  for (const u of run.crew_utilization ?? []) clockByCrew[u.crew_id] = u.clock_hours;
+  const crews: FixCrew[] = (
+    (crewRows ?? []) as Array<{ id: string; name: string; crew_size: number | string | null; home_branch_id: string }>
+  ).map((c) => ({
+    id: c.id,
+    name: c.name,
+    crew_size: Number(c.crew_size) || 2,
+    home_branch_id: c.home_branch_id,
+    clock_hours: clockByCrew[c.id] ?? 0,
+  }));
+
+  return planUnassignedFix(unassigned, branches, crews);
 }
 
 async function RunMap({ run, crewMeta }: { run: OptimizationRun; crewMeta: Record<string, string> }) {
@@ -330,7 +376,7 @@ function RunStatusBadge({ status }: { status: string }) {
   }
 }
 
-function CompletedRun({ run, crewMeta, unassigned }: { run: OptimizationRun; crewMeta: Record<string, string>; unassigned: UnassignedSummary | null }) {
+function CompletedRun({ run, crewMeta, unassigned, fixPlan }: { run: OptimizationRun; crewMeta: Record<string, string>; unassigned: UnassignedSummary | null; fixPlan: FixPlan | null }) {
   const utilization = run.crew_utilization ?? [];
   const routes = run.routes_jsonb?.per_day ?? [];
   const days = Array.from(new Set(routes.map((r) => r.day_of_week))).sort((a, b) => a - b);
@@ -348,6 +394,7 @@ function CompletedRun({ run, crewMeta, unassigned }: { run: OptimizationRun; cre
       </div>
 
       {unassigned && unassigned.count > 0 && <UnassignedCard summary={unassigned} />}
+      {fixPlan && <UnassignedFix plan={fixPlan} runId={run.id} />}
 
       {run.recommendation_text && (
         <Card>
