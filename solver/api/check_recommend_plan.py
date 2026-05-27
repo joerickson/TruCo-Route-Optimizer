@@ -86,4 +86,13 @@ reloc = plan["changes"]["relocations"]
 assert not any(r["to_branch_name"] == "SLC HQ" for r in reloc), reloc  # stg crew can't cross clusters
 assert plan["branches"]["stg"]["crews_after"]["three"] == 1, plan["branches"]["stg"]  # stays at stg
 
+# --- cluster gating, Tier 2 (rebalance): idle crew in a far cluster is NOT rebalanced across ---
+by_branch = {"slc": props("slc", 90.0), "stg": props("stg", 5.0)}
+crews = [crew("busy", "slc", 2), crew("idle", "stg", 2)]  # slc loaded (>50), stg idle+far
+clusters = {"slc": "slc", "stg": "stg"}
+plan = _plan_fleet_changes(crews, by_branch, {"busy": 58.0, "idle": 6.0}, BN, 110000,
+                           clusters=clusters)
+assert plan["changes"]["relocations"] == [], plan["changes"]   # no cross-cluster rebalance
+assert plan["totals"]["new_crews"] == 0, plan["totals"]
+
 print("check_recommend_plan: PASS")

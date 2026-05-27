@@ -514,7 +514,10 @@ def _plan_fleet_changes(
         # No cluster map (older callers / pure tests) => unrestricted (legacy behavior).
         if not cluster_of:
             return True
-        return cluster_of.get(bid_a) == cluster_of.get(bid_b)
+        ca, cb = cluster_of.get(bid_a), cluster_of.get(bid_b)
+        # An unmapped branch is its own singleton: never same-cluster as anything (avoids
+        # None == None treating two unknown branches as relocatable).
+        return ca is not None and ca == cb
 
     def sources():  # idle crews at non-short branches (not yet moved), biggest first then name
         out = [c for c in crews if is_idle(c) and deficit(c["home_branch_id"]) <= 0 and c["id"] not in moved_ids]
