@@ -208,13 +208,18 @@ assert any(r["to_branch_name"] == "Lindon" and r["reason"] == "deficit"
            for r in plan["changes"]["relocations"]), plan["changes"]   # SLC slack -> Lindon
 assert plan["totals"]["new_crews"] == 0, plan["totals"]                # cluster had capacity; no buy
 
-# --- but cluster genuinely short: relocate all slack, THEN buy the remainder ---
-by_branch = {"slc": props("slc", 250.0), "lin": props("lin", 400.0)}
-crews = [crew("s1", "slc", 3), crew("s2", "slc", 3), crew("l1", "lin", 2)]  # cluster cap 374 < demand 650
-util = {"s1": 55, "s2": 55, "l1": 58}
+# --- cluster genuinely short: relocate ALL the donor's slack, THEN buy the remainder ---
+# SLC (4×3p, cap 561, demand 200) can spare 2 crews (down to 281 ≥ 200); Lindon (1×2p, demand 500)
+# gets those 2 relocated, then the residual deficit is upsized/bought.
+by_branch = {"slc": props("slc", 200.0), "lin": props("lin", 500.0)}
+crews = [crew("s1", "slc", 3), crew("s2", "slc", 3), crew("s3", "slc", 3), crew("s4", "slc", 3),
+         crew("l1", "lin", 2)]
+util = {"s1": 55, "s2": 55, "s3": 55, "s4": 55, "l1": 58}  # all busy (not idle)
 plan = _plan_fleet_changes(crews, by_branch, util, {"slc": "SLC", "lin": "Lindon"}, 110000,
                            clusters={"slc": "wf", "lin": "wf"})
-assert plan["totals"]["new_crews"] >= 1, plan["totals"]                # slack exhausted -> buy
+assert any(r["to_branch_name"] == "Lindon" and r["reason"] == "deficit"
+           for r in plan["changes"]["relocations"]), plan["changes"]   # drained SLC's slack first
+assert plan["totals"]["new_crews"] >= 1, plan["totals"]                # then bought the remainder
 
 # --- _redeploy_surplus: surplus assets fund additions ($0) before counting new capital ---
 def _mk_plan(additions, fleet_before, fleet_after, capex=110000):
