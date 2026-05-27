@@ -24,6 +24,7 @@ Vercel Python uses the BaseHTTPRequestHandler-style handler convention.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -38,6 +39,8 @@ from typing import Any
 # .py files in api/ can't be imported by name without this. Without it,
 # `from solver_logic import ...` raises ModuleNotFoundError at runtime.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from distance_matrix import haversine_miles
 
 # Diagnostic: capture import failures so the GET health check can report them
 # instead of the function silently 500ing on invocation.
@@ -72,6 +75,17 @@ WEEKDAY_FIELDS = {
 _DAY_CAPACITY_HEADROOM = 0.85  # leave ~15% of a day's labor capacity for drive time
 _MAX_REBALANCE_ROUNDS = 3
 _REBALANCE_TIME_CAP_SECONDS = 240
+
+# Crew-mix recommender tunables.
+_REC_SUSTAINABLE_CLOCK_PER_WEEK = 50.0
+_REC_USABLE_FRACTION = 0.85
+_REC_MAX_HOURS_PER_DAY = 10.0
+_REC_CAP2 = _REC_USABLE_FRACTION * _REC_SUSTAINABLE_CLOCK_PER_WEEK * 2  # ~85 person-hrs/wk
+_REC_CAP3 = _REC_USABLE_FRACTION * _REC_SUSTAINABLE_CLOCK_PER_WEEK * 3  # ~127.5
+_REC_OVER_PROVISIONED_CLOCK = 40.0  # a crew under this weekly clock is under-used
+_REC_MAX_RUNS = 5
+_REC_TIME_CAP_SECONDS = 600
+_REC_VALIDATE_SECONDS = 5
 
 
 def _day_capacities(
@@ -282,6 +296,188 @@ def _properties_for_solver(
     return out
 
 
+def _attribute_to_branches(
+    properties: list[dict[str, Any]], branches: list[dict[str, Any]]
+) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+    """Group active properties under a branch: preferred_branch_id if that branch is
+    active, else the nearest active geocoded branch by Haversine. Properties with no
+    coordinates and no usable preferred branch are returned as unattributable ids."""
+    active = [b for b in branches if b.get("lat") is not None and b.get("lng") is not None]
+    active_ids = {b["id"] for b in active}
+    by_branch: dict[str, list[dict[str, Any]]] = {b["id"]: [] for b in active}
+    unattributable: list[str] = []
+    for p in properties:
+        pref = p.get("preferred_branch_id")
+        if pref in active_ids:
+            by_branch[pref].append(p)
+            continue
+        if p.get("lat") is None or p.get("lng") is None or not active:
+            unattributable.append(p["id"])
+            continue
+        nearest = min(
+            active,
+            key=lambda b: haversine_miles(float(p["lat"]), float(p["lng"]), float(b["lat"]), float(b["lng"])),
+        )
+        by_branch[nearest["id"]].append(p)
+    return by_branch, unattributable
+
+
+def _make_rec_crew(branch_id: str, k: int, size: int) -> dict[str, Any]:
+    """A synthetic Mon-Fri crew at a branch, shaped for run_optimization."""
+    return {
+        "id": f"rec-{branch_id}-{k}",
+        "name": f"Rec crew {k} ({size}p)",
+        "crew_size": size,
+        "home_branch_id": branch_id,
+        "max_clock_hours_per_day": _REC_MAX_HOURS_PER_DAY,
+        "works_monday": True,
+        "works_tuesday": True,
+        "works_wednesday": True,
+        "works_thursday": True,
+        "works_friday": True,
+        "works_saturday": False,
+        "works_sunday": False,
+    }
+
+
+def _bin_pack_branch(props: list[dict[str, Any]], branch_id: str) -> list[dict[str, Any]]:
+    """First-fit-decreasing pack of a branch's properties (weekly labor =
+    est_labor_hours) into 2-/3-person crew bins. Returns synthetic crew dicts."""
+    bins: list[dict[str, Any]] = []  # {size, cap, load}
+
+    def open_bin(size: int) -> dict[str, Any]:
+        b = {"size": size, "cap": _REC_CAP3 if size == 3 else _REC_CAP2, "load": 0.0}
+        bins.append(b)
+        return b
+
+    for p in sorted(props, key=lambda p: float(p["est_labor_hours"]), reverse=True):
+        labor = float(p["est_labor_hours"])
+        if labor > _REC_CAP3:  # oversize: dedicated 3-person crews, split evenly
+            n = math.ceil(labor / _REC_CAP3)
+            for _ in range(n):
+                b = open_bin(3)
+                b["load"] = labor / n
+            continue
+        if labor > _REC_CAP2:  # needs a 3-person crew
+            fit = next((b for b in bins if b["size"] == 3 and b["cap"] - b["load"] >= labor), None)
+            (fit or open_bin(3))["load"] += labor
+            continue
+        # labor <= cap2: fit into any bin with room, preferring to fill 3-person bins'
+        # slack (tightest fit), else open a 2-person bin.
+        fits = [b for b in bins if b["cap"] - b["load"] >= labor]
+        if fits:
+            fits.sort(key=lambda b: (b["size"] != 3, b["cap"] - b["load"]))
+            fits[0]["load"] += labor
+        else:
+            open_bin(2)["load"] += labor
+
+    return [_make_rec_crew(branch_id, k + 1, b["size"]) for k, b in enumerate(bins)]
+
+
+def _seed_fleet(properties: list[dict[str, Any]], branches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Analytical starting fleet: bin-pack each branch's attributed properties."""
+    by_branch, _unattributable = _attribute_to_branches(properties, branches)
+    fleet: list[dict[str, Any]] = []
+    for branch_id, props in by_branch.items():
+        fleet.extend(_bin_pack_branch(props, branch_id))
+    return fleet
+
+
+def _recommend_adjustments(
+    fleet: list[dict[str, Any]],
+    crew_util: list[dict[str, Any]],
+    unassigned_ids: list[str],
+    prop_branch: dict[str, str],
+    prop_labor: dict[str, float],
+) -> tuple[list[tuple[str, int]], list[str]]:
+    """Decide per-branch crew changes after a validate run.
+
+    Returns (adds, removes): `adds` = list of (branch_id, size) crews to add where a
+    branch has uncovered work (size 3 if any uncovered property at that branch exceeds
+    a 2-person crew's weekly capacity, else 2); `removes` = crew ids to drop on
+    branches that are fully covered yet over-provisioned (all crews under the clock
+    floor and more than one crew)."""
+    util_by_crew = {u["crew_id"]: float(u["clock_hours"]) for u in crew_util}
+    crews_by_branch: dict[str, list[dict[str, Any]]] = {}
+    for c in fleet:
+        crews_by_branch.setdefault(c["home_branch_id"], []).append(c)
+
+    unassigned_by_branch: dict[str, list[str]] = {}
+    for pid in unassigned_ids:
+        b = prop_branch.get(pid)
+        if b is not None:
+            unassigned_by_branch.setdefault(b, []).append(pid)
+
+    adds: list[tuple[str, int]] = []
+    for branch_id, pids in unassigned_by_branch.items():
+        size = 3 if any(prop_labor.get(pid, 0.0) > _REC_CAP2 for pid in pids) else 2
+        adds.append((branch_id, size))
+
+    removes: list[str] = []
+    if not unassigned_ids:  # only trim when everything is covered
+        for branch_id, crews in crews_by_branch.items():
+            if len(crews) > 1 and all(util_by_crew.get(c["id"], 0.0) < _REC_OVER_PROVISIONED_CLOCK for c in crews):
+                least = min(crews, key=lambda c: util_by_crew.get(c["id"], 0.0))
+                removes.append(least["id"])
+
+    return adds, removes
+
+
+def _build_recommendation(
+    fleet: list[dict[str, Any]],
+    result: dict[str, Any],
+    by_branch: dict[str, list[dict[str, Any]]],
+    prop_labor: dict[str, float],
+    unattributable: list[str],
+    branches: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Assemble the recommendation payload from the final fleet + last validate result."""
+    branch_name = {b["id"]: b.get("name", b["id"]) for b in branches}
+    util_by_crew = {u["crew_id"]: u for u in result.get("crew_utilization", [])}
+    crews_by_branch: dict[str, list[dict[str, Any]]] = {}
+    for c in fleet:
+        crews_by_branch.setdefault(c["home_branch_id"], []).append(c)
+
+    branches_out: list[dict[str, Any]] = []
+    tot2 = tot3 = 0
+    for branch_id, props in by_branch.items():
+        crews = crews_by_branch.get(branch_id, [])
+        two = sum(1 for c in crews if c["crew_size"] == 2)
+        three = sum(1 for c in crews if c["crew_size"] == 3)
+        tot2 += two
+        tot3 += three
+        demand = sum(float(p["est_labor_hours"]) for p in props)
+        utils = [float(util_by_crew.get(c["id"], {}).get("util_pct", 0.0)) for c in crews]
+        drivers = [p["name"] for p in props if _REC_CAP2 < float(p["est_labor_hours"]) <= _REC_CAP3]
+        splits = [p["name"] for p in props if float(p["est_labor_hours"]) > _REC_CAP3]
+        branches_out.append({
+            "branch_id": branch_id,
+            "branch_name": branch_name.get(branch_id, branch_id),
+            "two_person": two,
+            "three_person": three,
+            "total_people": two * 2 + three * 3,
+            "demand_hours": round(demand, 1),
+            "avg_util_pct": round(sum(utils) / len(utils), 1) if utils else 0.0,
+            "drivers_three_person": drivers,
+            "split_properties": splits,
+        })
+
+    unassigned_ids = result.get("unassigned_property_ids", []) or []
+    residual_hours = sum(prop_labor.get(pid, 0.0) for pid in unassigned_ids)
+    return {
+        "branches": branches_out,
+        "totals": {
+            "two_person": tot2,
+            "three_person": tot3,
+            "total_crews": tot2 + tot3,
+            "total_people": tot2 * 2 + tot3 * 3,
+            "demand_hours": round(sum(prop_labor.values()), 1),
+        },
+        "unattributable_property_ids": unattributable,
+        "residual_unassigned": {"count": len(unassigned_ids), "labor_hours": round(residual_hours, 1)},
+    }
+
+
 def _classify_capacity(avg_clock_per_crew: float) -> tuple[str, str]:
     if avg_clock_per_crew < 40:
         return (
@@ -465,6 +661,7 @@ def _solve_days(
     buckets: dict[int, list[dict[str, Any]]],
     crews: list[dict[str, Any]],
     branches_by_id: dict[str, dict[str, Any]],
+    time_limit_seconds: int = 8,
 ) -> tuple[dict[int, list[dict[str, Any]]], dict[int, list[str]]]:
     """Solve each given day independently. Returns ({day: routes}, {day: unassigned_chunk_ids}).
 
@@ -483,13 +680,13 @@ def _solve_days(
             routes_by_day[day] = []
             unassigned_by_day[day] = [c["id"] for c in chunks]
             continue
-        result = solve_day(day, chunks, crews_today, time_limit_seconds=8)
+        result = solve_day(day, chunks, crews_today, time_limit_seconds=time_limit_seconds)
         routes_by_day[day] = result["routes"]
         unassigned_by_day[day] = result.get("unassigned", [])
     return routes_by_day, unassigned_by_day
 
 
-def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
+def run_optimization(payload: dict[str, Any], time_limit_seconds: int = 8) -> dict[str, Any]:
     started = time.time()
     crews = payload["crews"]
     branches = payload["branches"]
@@ -503,7 +700,7 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
     chunk_by_id = {c["id"]: c for c in solver_props}
 
     # Initial solve of every day.
-    routes_by_day, unassigned_by_day = _solve_days(work_days, buckets, crews, branches_by_id)
+    routes_by_day, unassigned_by_day = _solve_days(work_days, buckets, crews, branches_by_id, time_limit_seconds=time_limit_seconds)
 
     # Bounded cross-day rebalance: move still-unassigned chunks to days with spare
     # capacity and re-solve only the changed days. A `tried` set prevents cycling;
@@ -539,7 +736,7 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
             dirty.add(target)
         if not dirty:
             break
-        re_routes, re_unassigned = _solve_days(sorted(dirty), buckets, crews, branches_by_id)
+        re_routes, re_unassigned = _solve_days(sorted(dirty), buckets, crews, branches_by_id, time_limit_seconds=time_limit_seconds)
         routes_by_day.update(re_routes)
         unassigned_by_day.update(re_unassigned)
 
@@ -548,8 +745,73 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
     return _aggregate_result(crews, all_routes, unassigned, properties, time.time() - started)
 
 
-def _supabase_patch(run_id: str, fields: dict[str, Any]) -> None:
-    """PATCH a single optimization_runs row via Supabase REST.
+def run_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
+    """recommend mode: analytical seed -> validate with run_optimization -> bounded
+    add/trim loop -> write result to crew_recommendations."""
+    started = time.time()
+    rec_id = payload.get("recommendation_id")
+    branches = payload["branches"]
+    properties = payload["properties"]
+    try:
+        by_branch, unattributable = _attribute_to_branches(properties, branches)
+        prop_branch = {p["id"]: b_id for b_id, props in by_branch.items() for p in props}
+        prop_labor = {p["id"]: float(p["est_labor_hours"]) for p in properties}
+
+        fleet = _seed_fleet(properties, branches)
+        next_idx: dict[str, int] = {}
+
+        def validate(crews: list[dict[str, Any]]) -> dict[str, Any]:
+            return run_optimization(
+                {"crews": crews, "branches": branches, "properties": properties},
+                time_limit_seconds=_REC_VALIDATE_SECONDS,
+            )
+
+        result = validate(fleet)
+        iterations = 1
+        for _round in range(_REC_MAX_RUNS - 1):
+            if (time.time() - started) > _REC_TIME_CAP_SECONDS:
+                break
+            adds, removes = _recommend_adjustments(
+                fleet, result["crew_utilization"], result["unassigned_property_ids"], prop_branch, prop_labor
+            )
+            if not adds and not removes:
+                break
+            if removes:
+                rm = set(removes)
+                fleet = [c for c in fleet if c["id"] not in rm]
+            for branch_id, size in adds:
+                # start added-crew indices well above the seed fleet's 1-based ids to avoid collisions
+                k = next_idx.get(branch_id, 1000) + 1
+                next_idx[branch_id] = k
+                fleet.append(_make_rec_crew(branch_id, k, size))
+            result = validate(fleet)
+            iterations += 1
+
+        rec = _build_recommendation(fleet, result, by_branch, prop_labor, unattributable, branches)
+        if rec_id:
+            _supabase_patch("crew_recommendations", rec_id, {
+                "status": "completed",
+                "result_jsonb": rec,
+                "iterations": iterations,
+                "solver_runtime_seconds": round(time.time() - started, 1),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            })
+        return {"status": "completed", "iterations": iterations, **rec}
+    except Exception as e:
+        if rec_id:
+            try:
+                _supabase_patch("crew_recommendations", rec_id, {
+                    "status": "failed",
+                    "failure_reason": str(e)[:500],
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass
+        raise
+
+
+def _supabase_patch(table: str, row_id: str, fields: dict[str, Any]) -> None:
+    """PATCH a single row in the given Supabase table via REST.
 
     Uses urllib.request rather than the supabase-py library because supabase-py
     2.10.0 rejects the new sb_secret_* service-role key format with "Invalid
@@ -561,7 +823,7 @@ def _supabase_patch(run_id: str, fields: dict[str, Any]) -> None:
         raise RuntimeError(f"Missing supabase env: url_set={bool(url)}, key_set={bool(key)}")
 
     req = urllib.request.Request(
-        f"{url}/rest/v1/optimization_runs?id=eq.{run_id}",
+        f"{url}/rest/v1/{table}?id=eq.{row_id}",
         method="PATCH",
         data=json.dumps(fields).encode("utf-8"),
         headers={
@@ -577,13 +839,13 @@ def _supabase_patch(run_id: str, fields: dict[str, Any]) -> None:
         raise RuntimeError(f"Supabase PATCH {e.code}: {e.read().decode()[:300]}") from None
     rows = json.loads(resp_body) if resp_body else []
     if not rows:
-        raise RuntimeError(f"Update returned no rows for run_id={run_id}")
+        raise RuntimeError(f"Update returned no rows for {table} id={row_id}")
 
 
 def _persist(run_id: str, result: dict[str, Any]) -> None:
     # Postgres needs an ISO timestamp here. Sending the literal string "now()"
     # was the silent-failure bug that left runs stuck on 'running'.
-    _supabase_patch(run_id, {
+    _supabase_patch("optimization_runs", run_id, {
         "status": result["status"],
         "solver_runtime_seconds": result["solver_runtime_seconds"],
         "total_clock_hours_per_week": result["total_clock_hours_per_week"],
@@ -608,12 +870,20 @@ class handler(BaseHTTPRequestHandler):
 
             run_id = payload.get("run_id")
             mode = payload.get("mode", "optimize")
-            result = run_evaluation(payload) if mode == "evaluate" else run_optimization(payload)
-            if run_id:
-                # Let _persist failures surface to the outer except so the run
-                # row gets marked 'failed'. Returning 200 with a swallowed
-                # persist_error left runs stuck on 'running' forever.
-                _persist(run_id, result)
+            if mode == "recommend":
+                # run_recommendation writes its own crew_recommendations row.
+                result = run_recommendation(payload)
+            elif mode == "evaluate":
+                result = run_evaluation(payload)
+                if run_id:
+                    _persist(run_id, result)
+            else:
+                result = run_optimization(payload)
+                if run_id:
+                    # Let _persist failures surface to the outer except so the run
+                    # row gets marked 'failed'. Returning 200 with a swallowed
+                    # persist_error left runs stuck on 'running' forever.
+                    _persist(run_id, result)
 
             self.send_response(200)
             self.send_header("content-type", "application/json")
@@ -621,9 +891,9 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(result).encode("utf-8"))
         except Exception as e:
             err = {"status": "failed", "error": str(e), "trace": traceback.format_exc()[-500:]}
-            if run_id := (locals().get("run_id")):
+            if (locals().get("mode") != "recommend") and (run_id := (locals().get("run_id"))):
                 try:
-                    _supabase_patch(run_id, {
+                    _supabase_patch("optimization_runs", run_id, {
                         "status": "failed",
                         "failure_reason": str(e)[:500],
                         "completed_at": datetime.now(timezone.utc).isoformat(),

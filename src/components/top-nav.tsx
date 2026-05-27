@@ -11,6 +11,7 @@ const NAV = [
   { href: '/optimize', label: 'Optimize' },
   { href: '/capacity', label: 'Capacity' },
   { href: '/compare', label: 'Compare' },
+  { href: '/recommend', label: 'Recommend' },
 ];
 
 export function TopNav() {
