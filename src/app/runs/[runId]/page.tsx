@@ -69,13 +69,21 @@ export default async function RunPage({
       : [];
   const branchFilter =
     searchParams.branch && branchIdsInRun.includes(searchParams.branch) ? searchParams.branch : null;
-  const viewRun: OptimizationRun = branchFilter
-    ? {
-        ...run,
-        crew_utilization: (run.crew_utilization ?? []).filter((c) => crewBranchId[c.crew_id] === branchFilter),
-        routes_jsonb: { per_day: allRoutes.filter((r) => r.branch_id === branchFilter) },
-      }
-    : run;
+  let viewRun: OptimizationRun = run;
+  if (branchFilter) {
+    const filteredUtil = (run.crew_utilization ?? []).filter((c) => crewBranchId[c.crew_id] === branchFilter);
+    const sum = (k: 'clock_hours' | 'drive_hours' | 'drive_miles') =>
+      filteredUtil.reduce((acc, c) => acc + (c[k] ?? 0), 0);
+    viewRun = {
+      ...run,
+      crew_utilization: filteredUtil,
+      routes_jsonb: { per_day: allRoutes.filter((r) => r.branch_id === branchFilter) },
+      // Summary stat cards should reflect the selected branch, not the whole run.
+      total_clock_hours_per_week: sum('clock_hours'),
+      total_drive_hours_per_week: sum('drive_hours'),
+      total_drive_miles_per_week: sum('drive_miles'),
+    };
+  }
 
   return (
     <div className="space-y-6">
@@ -93,7 +101,7 @@ export default async function RunPage({
           </p>
         </div>
         <div className="flex items-center gap-3">
-          {run.status === 'completed' && <RunViewToggle runId={run.id} current={view} />}
+          {run.status === 'completed' && <RunViewToggle runId={run.id} current={view} branch={branchFilter} />}
           <RunStatusBadge status={run.status} />
         </div>
       </div>
