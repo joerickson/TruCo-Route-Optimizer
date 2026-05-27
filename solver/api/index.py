@@ -39,6 +39,8 @@ from typing import Any
 # `from solver_logic import ...` raises ModuleNotFoundError at runtime.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from distance_matrix import haversine_miles
+
 # Diagnostic: capture import failures so the GET health check can report them
 # instead of the function silently 500ing on invocation.
 _IMPORT_ERRORS: list[str] = []
@@ -72,6 +74,17 @@ WEEKDAY_FIELDS = {
 _DAY_CAPACITY_HEADROOM = 0.85  # leave ~15% of a day's labor capacity for drive time
 _MAX_REBALANCE_ROUNDS = 3
 _REBALANCE_TIME_CAP_SECONDS = 240
+
+# Crew-mix recommender tunables.
+_REC_SUSTAINABLE_CLOCK_PER_WEEK = 50.0
+_REC_USABLE_FRACTION = 0.85
+_REC_MAX_HOURS_PER_DAY = 10.0
+_REC_CAP2 = _REC_USABLE_FRACTION * _REC_SUSTAINABLE_CLOCK_PER_WEEK * 2  # ~85 person-hrs/wk
+_REC_CAP3 = _REC_USABLE_FRACTION * _REC_SUSTAINABLE_CLOCK_PER_WEEK * 3  # ~127.5
+_REC_OVER_PROVISIONED_CLOCK = 40.0  # a crew under this weekly clock is under-used
+_REC_MAX_RUNS = 5
+_REC_TIME_CAP_SECONDS = 600
+_REC_VALIDATE_SECONDS = 5
 
 
 def _day_capacities(
@@ -280,6 +293,94 @@ def _properties_for_solver(
                 }
             )
     return out
+
+
+def _attribute_to_branches(
+    properties: list[dict[str, Any]], branches: list[dict[str, Any]]
+) -> tuple[dict[str, list[dict[str, Any]]], list[str]]:
+    """Group active properties under a branch: preferred_branch_id if that branch is
+    active, else the nearest active geocoded branch by Haversine. Properties with no
+    coordinates and no usable preferred branch are returned as unattributable ids."""
+    active = [b for b in branches if b.get("lat") is not None and b.get("lng") is not None]
+    active_ids = {b["id"] for b in active}
+    by_branch: dict[str, list[dict[str, Any]]] = {b["id"]: [] for b in active}
+    unattributable: list[str] = []
+    for p in properties:
+        pref = p.get("preferred_branch_id")
+        if pref in active_ids:
+            by_branch[pref].append(p)
+            continue
+        if p.get("lat") is None or p.get("lng") is None or not active:
+            unattributable.append(p["id"])
+            continue
+        nearest = min(
+            active,
+            key=lambda b: haversine_miles(float(p["lat"]), float(p["lng"]), float(b["lat"]), float(b["lng"])),
+        )
+        by_branch[nearest["id"]].append(p)
+    return by_branch, unattributable
+
+
+def _make_rec_crew(branch_id: str, k: int, size: int) -> dict[str, Any]:
+    """A synthetic Mon-Fri crew at a branch, shaped for run_optimization."""
+    return {
+        "id": f"rec-{branch_id}-{k}",
+        "name": f"Rec crew {k} ({size}p)",
+        "crew_size": size,
+        "home_branch_id": branch_id,
+        "max_clock_hours_per_day": _REC_MAX_HOURS_PER_DAY,
+        "works_monday": True,
+        "works_tuesday": True,
+        "works_wednesday": True,
+        "works_thursday": True,
+        "works_friday": True,
+        "works_saturday": False,
+        "works_sunday": False,
+    }
+
+
+def _bin_pack_branch(props: list[dict[str, Any]], branch_id: str) -> list[dict[str, Any]]:
+    """First-fit-decreasing pack of a branch's properties (weekly labor =
+    est_labor_hours) into 2-/3-person crew bins. Returns synthetic crew dicts."""
+    bins: list[dict[str, Any]] = []  # {size, cap, load}
+
+    def open_bin(size: int) -> dict[str, Any]:
+        b = {"size": size, "cap": _REC_CAP3 if size == 3 else _REC_CAP2, "load": 0.0}
+        bins.append(b)
+        return b
+
+    for p in sorted(props, key=lambda p: float(p["est_labor_hours"]), reverse=True):
+        labor = float(p["est_labor_hours"])
+        if labor > _REC_CAP3:  # oversize: dedicated 3-person crews, split evenly
+            import math
+            n = math.ceil(labor / _REC_CAP3)
+            for _ in range(n):
+                b = open_bin(3)
+                b["load"] = labor / n
+            continue
+        if labor > _REC_CAP2:  # needs a 3-person crew
+            fit = next((b for b in bins if b["size"] == 3 and b["cap"] - b["load"] >= labor), None)
+            (fit or open_bin(3))["load"] += labor
+            continue
+        # labor <= cap2: fit into any bin with room, preferring to fill 3-person bins'
+        # slack (tightest fit), else open a 2-person bin.
+        fits = [b for b in bins if b["cap"] - b["load"] >= labor]
+        if fits:
+            fits.sort(key=lambda b: (b["size"] != 3, b["cap"] - b["load"]))
+            fits[0]["load"] += labor
+        else:
+            open_bin(2)["load"] += labor
+
+    return [_make_rec_crew(branch_id, k + 1, b["size"]) for k, b in enumerate(bins)]
+
+
+def _seed_fleet(properties: list[dict[str, Any]], branches: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Analytical starting fleet: bin-pack each branch's attributed properties."""
+    by_branch, _unattributable = _attribute_to_branches(properties, branches)
+    fleet: list[dict[str, Any]] = []
+    for branch_id, props in by_branch.items():
+        fleet.extend(_bin_pack_branch(props, branch_id))
+    return fleet
 
 
 def _classify_capacity(avg_clock_per_crew: float) -> tuple[str, str]:
