@@ -57,32 +57,49 @@ def solve_day(
         int(round(float(p["labor_hours"]) * 3600)) for p in properties_for_day
     ]
 
-    # One transit callback per distinct crew size present today.
+    # One transit callback per distinct crew size present today. Two flavors:
+    #   - arc cost = work//size + drive  -> the objective minimizes work + driving
+    #   - work-only = work//size         -> the daily capacity dimension (drive rides on top)
     sizes = sorted({int(c.get("crew_size") or 2) for c in crews_for_day})
-    transit_idx_by_size: dict[int, int] = {}
+    cost_idx_by_size: dict[int, int] = {}
+    work_idx_by_size: dict[int, int] = {}
     for s in sizes:
-        def make_cb(size: int):
+        def make_cost_cb(size: int):
             def cb(from_index: int, to_index: int) -> int:
                 fn = manager.IndexToNode(from_index)
                 tn = manager.IndexToNode(to_index)
                 return person_seconds[fn] // size + distance_matrix[fn][tn]
             return cb
-        transit_idx_by_size[s] = routing.RegisterTransitCallback(make_cb(s))
 
-    transit_idx_by_vehicle = [
-        transit_idx_by_size[int(c.get("crew_size") or 2)] for c in crews_for_day
+        def make_work_cb(size: int):
+            def wcb(from_index: int, to_index: int) -> int:
+                fn = manager.IndexToNode(from_index)
+                return person_seconds[fn] // size
+            return wcb
+
+        cost_idx_by_size[s] = routing.RegisterTransitCallback(make_cost_cb(s))
+        work_idx_by_size[s] = routing.RegisterTransitCallback(make_work_cb(s))
+
+    for v in range(n_crews):
+        routing.SetArcCostEvaluatorOfVehicle(
+            cost_idx_by_size[int(crews_for_day[v].get("crew_size") or 2)], v
+        )
+
+    # Daily capacity caps WORK only (service ÷ crew_size), so max_clock_hours_per_day is a
+    # 10-hour *work* day; drive time rides on top with no separate total-day cap (the arc cost
+    # already keeps routes from wandering). A far property whose work fits the day is assignable
+    # even when work + drive would exceed it. Crew-size-aware: a 24 person-hr job is 12 work-hrs
+    # for a 2-person crew (dropped) but 8 for a 3-person crew (fits).
+    work_transit_by_vehicle = [
+        work_idx_by_size[int(c.get("crew_size") or 2)] for c in crews_for_day
     ]
-    for v in range(n_crews):
-        routing.SetArcCostEvaluatorOfVehicle(transit_idx_by_vehicle[v], v)
-
     caps = [int(round(float(c["max_clock_hours"]) * 3600)) for c in crews_for_day]
-    dim_capacity = max(caps)  # per-vehicle real caps applied below via SetMax
     routing.AddDimensionWithVehicleTransits(
-        transit_idx_by_vehicle, 0, dim_capacity, True, "Time"
+        work_transit_by_vehicle, 0, max(caps), True, "Work"
     )
-    time_dim = routing.GetDimensionOrDie("Time")
+    work_dim = routing.GetDimensionOrDie("Work")
     for v in range(n_crews):
-        time_dim.CumulVar(routing.End(v)).SetMax(caps[v])
+        work_dim.CumulVar(routing.End(v)).SetMax(caps[v])
 
     # Each chunk may be dropped (= unassigned) at a high cost — only if infeasible.
     drop_penalty = 10_000_000
