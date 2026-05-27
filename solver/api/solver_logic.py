@@ -21,6 +21,11 @@ from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
 from distance_matrix import build_matrix, drive_miles
 
+# Total-day backstop: a crew's work + drive may exceed the work cap by at most this many hours,
+# so no crew-day runs absurdly long (e.g. cross-region). Work itself is capped separately at
+# each crew's max_clock_hours_per_day.
+_DRIVE_ALLOWANCE_HOURS = 2.0
+
 
 def solve_day(
     day_of_week: int,
@@ -86,10 +91,9 @@ def solve_day(
         )
 
     # Daily capacity caps WORK only (service ÷ crew_size), so max_clock_hours_per_day is a
-    # 10-hour *work* day; drive time rides on top with no separate total-day cap (the arc cost
-    # already keeps routes from wandering). A far property whose work fits the day is assignable
-    # even when work + drive would exceed it. Crew-size-aware: a 24 person-hr job is 12 work-hrs
-    # for a 2-person crew (dropped) but 8 for a 3-person crew (fits).
+    # 10-hour *work* day; drive rides on top. A far property whose work fits the day is
+    # assignable even when work + drive would exceed it. Crew-size-aware: a 24 person-hr job
+    # is 12 work-hrs for a 2-person crew (dropped) but 8 for a 3-person crew (fits).
     work_transit_by_vehicle = [
         work_idx_by_size[int(c.get("crew_size") or 2)] for c in crews_for_day
     ]
@@ -100,6 +104,24 @@ def solve_day(
     work_dim = routing.GetDimensionOrDie("Work")
     for v in range(n_crews):
         work_dim.CumulVar(routing.End(v)).SetMax(caps[v])
+
+    # Total-day backstop: work + drive per crew-day is bounded at max_clock_hours +
+    # _DRIVE_ALLOWANCE_HOURS, so no crew is scheduled an absurd day (e.g. driving across
+    # regions). Regional routing keeps drives local; this guarantees it even within a
+    # spread-out cluster. Reuses the cost transit (work//size + drive).
+    total_transit_by_vehicle = [
+        cost_idx_by_size[int(c.get("crew_size") or 2)] for c in crews_for_day
+    ]
+    total_caps = [
+        int(round((float(c["max_clock_hours"]) + _DRIVE_ALLOWANCE_HOURS) * 3600))
+        for c in crews_for_day
+    ]
+    routing.AddDimensionWithVehicleTransits(
+        total_transit_by_vehicle, 0, max(total_caps), True, "Total"
+    )
+    total_dim = routing.GetDimensionOrDie("Total")
+    for v in range(n_crews):
+        total_dim.CumulVar(routing.End(v)).SetMax(total_caps[v])
 
     # Each chunk may be dropped (= unassigned) at a high cost — only if infeasible.
     drop_penalty = 10_000_000
