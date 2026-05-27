@@ -106,4 +106,14 @@ after = plan["branches"]["stg"]["crews_after"]
 assert after["two"] + after["three"] == 3, after          # nobody relocated (singleton cluster)
 assert plan["changes"]["surplus_idle"] == [{"branch_name": "St George", "count": 2}], plan["changes"]
 
+# --- coverage floor in sources(): a lone NEEDED crew at a same-cluster branch is not relocated ---
+# (regression guard: without keeps_coverage, stg's only crew would move to slc, stranding stg's 80h)
+by_branch = {"slc": props("slc", 200.0), "stg": props("stg", 80.0)}
+crews = [crew("b1", "slc", 3), crew("a1", "stg", 2)]   # stg: 1 crew, needed for 80h (cap 93.5)
+clusters = {"slc": "slc_stg", "stg": "slc_stg"}        # SAME cluster, so only keeps_coverage can block
+plan = _plan_fleet_changes(crews, by_branch, {"b1": 60.0, "a1": 25.0}, BN, 110000,
+                           clusters=clusters)
+assert plan["branches"]["stg"]["crews_after"]["two"] == 1, plan["branches"]["stg"]  # stg keeps its crew
+assert plan["totals"]["new_crews"] >= 1, plan["totals"]  # slc closed its deficit by buying, not draining stg
+
 print("check_recommend_plan: PASS")

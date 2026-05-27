@@ -616,7 +616,7 @@ def _plan_fleet_changes(
             continue
         cap = branch_cap(bid)
         removable = 0
-        for c in sorted(idle_here, key=cap_of):  # drop smallest first to maximize count kept honest
+        for c in sorted(idle_here, key=cap_of):  # drop smallest first to maximize removable (surplus) count
             if cap - cap_of(c) >= demand.get(bid, 0.0):
                 cap -= cap_of(c)
                 removable += 1
