@@ -76,8 +76,16 @@ id, name, crew_size, home_branch_id), **`capex_usd`** (number),
      c. Else **buy** crews: 3-person if any uncovered attributed property `> CAP2`
         (a 2-person crew can't do it in a sustainable week), else 2-person; subtract
         tight capacity until `deficit_B ≤ 0`.
-   - Leftover idle crews not relocated → `redeploy_flags` (branch, count) — surfaced,
-     **never auto-removed** (capex is sunk; this just flags idle rigs).
+   - **Rebalance pass (still free):** after every `>55` deficit is closed, keep
+     relocating *remaining* idle crews to the branch whose crews are most loaded and
+     still **above the sustainable band** (avg clock `> 50`), most-loaded first,
+     recomputing after each move; stop when no branch is above 50 or idle crews run
+     out. (Free capacity flows toward the tightest branches for margin — never to a
+     branch already comfortably `≤ 50`, so no pointless shuffling.)
+   - Only crews with **no beneficial target** (every branch already `≤ 50`) →
+     `surplus_idle` (branch, count): surfaced as idle rigs that could be redeployed,
+     **never auto-removed/disbanded** (capex is sunk). Relocation is always preferred
+     over flagging.
 4. **Validate the proposed fleet** (current ± relocations/upsizes/adds) with
    `run_optimization` → `util_after` + routes. **Bounded refine:** if a branch's crews
    still sustain `> 55` clock-h (genuine shortfall, not a one-property artifact),
@@ -126,10 +134,10 @@ Persist it as a read-only run and link to it.
     "split_properties":     [prop_name]   // props > CAP3
   }],
   "changes": {
-    "relocations": [{ "crew_name", "from_branch_name", "to_branch_name" }],
+    "relocations": [{ "crew_name", "from_branch_name", "to_branch_name", "reason": "deficit"|"rebalance" }],
     "upsizes":     [{ "branch_name", "count" }],
     "additions":   [{ "branch_name", "size": 2|3, "count" }],
-    "redeploy_flags": [{ "branch_name", "count" }]
+    "surplus_idle": [{ "branch_name", "count" }]   // idle rigs with no beneficial target; redeployable, not disbanded
   },
   "totals": {
     "fleet_before": int, "fleet_after": int,
@@ -202,8 +210,11 @@ solver (per deploy-workflow).
     (labor-only) chosen before a buy; deficit closed.
   - **buy-last:** short branch, no sources, no upsizable crews → **buy** (3-person if
     a `>CAP2` property present, else 2-person); `new_crews`/`net_capital_usd` correct.
-  - **redeploy flag:** over-provisioned branch with idle crews none of which are
-    needed elsewhere → `redeploy_flags` set; not removed.
+  - **rebalance relocate:** no branch over the 55 deficit, but an idle crew exists at
+    a ≤40 branch while another branch's crews average >50 → idle crew **relocated**
+    to the loaded branch (`reason: "rebalance"`), not flagged.
+  - **surplus only when nothing benefits:** idle crew(s) and every branch already
+    ≤50 → `surplus_idle` set; no relocation, not removed.
   - **capex echo:** `capex_usd` from payload flows to `net_capital_usd = new_crews ×
     capex_usd`; determinism (stable ordering) across runs.
   - **name format:** `_make_rec_crew` → `"{Branch} · {size}p #{k}"`.
