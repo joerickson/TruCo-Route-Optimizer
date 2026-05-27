@@ -26,6 +26,10 @@ export function RecommendForm() {
         <Label htmlFor="name">Recommendation name</Label>
         <Input id="name" name="name" placeholder="Fleet plan — June 2026" />
       </div>
+      <div>
+        <Label htmlFor="capex">Capex per new crew ($)</Label>
+        <Input id="capex" name="capex" type="number" min={0} step={1000} defaultValue={110000} />
+      </div>
       <Button type="submit" disabled={pending}>{pending ? 'Starting…' : 'Recommend fleet'}</Button>
       {error && <p className="text-sm text-destructive">{error}</p>}
     </form>
