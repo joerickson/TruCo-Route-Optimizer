@@ -10,6 +10,7 @@ import { dayName, formatHours, formatMiles } from '@/lib/utils';
 import { RunRefresher } from './refresher';
 import { ExportCsvButton } from './export-csv';
 import { RunViewToggle } from './run-view-toggle';
+import { BranchFilter } from './branch-filter';
 import { RoutesMapLoader } from './routes-map-loader';
 import { RunCalendar } from './run-calendar';
 import { buildCalendarGrid, type CrewAvailability } from '@/lib/calendar-grid';
@@ -25,7 +26,7 @@ export default async function RunPage({
   searchParams,
 }: {
   params: { runId: string };
-  searchParams: { view?: string };
+  searchParams: { view?: string; branch?: string };
 }) {
   const view: 'list' | 'map' | 'calendar' =
     searchParams.view === 'map' ? 'map' : searchParams.view === 'calendar' ? 'calendar' : 'list';
@@ -56,6 +57,26 @@ export default async function RunPage({
       : null;
   const underUtilizedCrews = (run.crew_utilization ?? []).filter((c) => c.clock_hours > 0 && c.clock_hours < 40).length;
 
+  // Branch filter: routes carry branch_id, so derive the run's branches and (optionally) narrow
+  // the views to one. crew_utilization has no branch, so map crew_id -> branch_id via its routes.
+  const allRoutes: CrewDayRoute[] = run.routes_jsonb?.per_day ?? [];
+  const crewBranchId: Record<string, string> = {};
+  for (const r of allRoutes) crewBranchId[r.crew_id] = r.branch_id;
+  const branchIdsInRun = Array.from(new Set(allRoutes.map((r) => r.branch_id)));
+  const runBranches =
+    run.status === 'completed' && branchIdsInRun.length > 0
+      ? await loadBranchNames(supabase, branchIdsInRun)
+      : [];
+  const branchFilter =
+    searchParams.branch && branchIdsInRun.includes(searchParams.branch) ? searchParams.branch : null;
+  const viewRun: OptimizationRun = branchFilter
+    ? {
+        ...run,
+        crew_utilization: (run.crew_utilization ?? []).filter((c) => crewBranchId[c.crew_id] === branchFilter),
+        routes_jsonb: { per_day: allRoutes.filter((r) => r.branch_id === branchFilter) },
+      }
+    : run;
+
   return (
     <div className="space-y-6">
       {isPolling && <RunRefresher />}
@@ -76,6 +97,10 @@ export default async function RunPage({
           <RunStatusBadge status={run.status} />
         </div>
       </div>
+
+      {run.status === 'completed' && runBranches.length > 1 && (
+        <BranchFilter runId={run.id} view={view} current={branchFilter} branches={runBranches} />
+      )}
 
       {run.run_kind === 'baseline' && run.status === 'completed' && (
         <Card className="border-secondary">
@@ -99,7 +124,7 @@ export default async function RunPage({
         </div>
       )}
 
-      {run.status === 'completed' && unassignedSummary && unassignedSummary.count > 0 && (
+      {run.status === 'completed' && !branchFilter && unassignedSummary && unassignedSummary.count > 0 && (
         <UnassignedBanner
           count={unassignedSummary.count}
           totalUnplacedHours={unassignedSummary.totalUnplacedHours}
@@ -130,11 +155,16 @@ export default async function RunPage({
 
       {run.status === 'completed' &&
         (view === 'map' ? (
-          <RunMap run={run} crewMeta={crewMeta} />
+          <RunMap run={viewRun} crewMeta={crewMeta} />
         ) : view === 'calendar' ? (
-          <RunCalendarView run={run} crewMeta={crewMeta} />
+          <RunCalendarView run={viewRun} crewMeta={crewMeta} />
         ) : (
-          <CompletedRun run={run} crewMeta={crewMeta} unassigned={unassignedSummary} fixPlan={fixPlan} />
+          <CompletedRun
+            run={viewRun}
+            crewMeta={crewMeta}
+            unassigned={branchFilter ? null : unassignedSummary}
+            fixPlan={branchFilter ? null : fixPlan}
+          />
         ))}
     </div>
   );
@@ -177,6 +207,18 @@ async function loadCrewMeta(
     meta[c.id] = parts.join(' · ');
   }
   return meta;
+}
+
+// Branch id -> {id, name} for the branches a run's routes touch, sorted by name (for the filter).
+async function loadBranchNames(
+  supabase: ReturnType<typeof getServerClient>,
+  branchIds: string[]
+): Promise<{ id: string; name: string }[]> {
+  if (branchIds.length === 0) return [];
+  const { data } = await supabase.from('branches').select('id, name').in('id', branchIds);
+  return ((data ?? []) as Array<{ id: string; name: string }>)
+    .map((b) => ({ id: b.id, name: b.name }))
+    .sort((a, b) => a.name.localeCompare(b.name));
 }
 
 // Reconcile the run's unassigned properties (any chunk unplaced) with how much of
