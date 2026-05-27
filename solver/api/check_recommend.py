@@ -49,3 +49,33 @@ assert all("home_branch_id" in c and "crew_size" in c for c in fleet)
 assert {c["home_branch_id"] for c in fleet} <= {"slc", "provo"}
 
 print("check_recommend: PASS (attribution + bin-pack + seed)")
+
+from index import _recommend_adjustments
+
+adj_fleet = [
+    {"id": "rec-slc-1", "home_branch_id": "slc", "crew_size": 2},
+    {"id": "rec-provo-1", "home_branch_id": "provo", "crew_size": 2},
+    {"id": "rec-provo-2", "home_branch_id": "provo", "crew_size": 2},
+]
+prop_branch = {"u_big": "slc", "u_small": "provo"}
+prop_labor = {"u_big": 120.0, "u_small": 10.0}  # 120 > cap2 => needs 3-person
+
+# uncovered work at slc (big) and provo (small) => add 3p at slc, 2p at provo; no removes (unassigned present)
+adds, removes = _recommend_adjustments(
+    adj_fleet,
+    [{"crew_id": "rec-slc-1", "clock_hours": 50}, {"crew_id": "rec-provo-1", "clock_hours": 20}, {"crew_id": "rec-provo-2", "clock_hours": 15}],
+    ["u_big", "u_small"], prop_branch, prop_labor,
+)
+assert ("slc", 3) in adds and ("provo", 2) in adds, adds
+assert removes == [], removes
+
+# fully covered, provo over-provisioned (both crews < 40 clock) => trim provo's least-loaded; slc single crew untouched
+adds, removes = _recommend_adjustments(
+    adj_fleet,
+    [{"crew_id": "rec-slc-1", "clock_hours": 48}, {"crew_id": "rec-provo-1", "clock_hours": 20}, {"crew_id": "rec-provo-2", "clock_hours": 15}],
+    [], prop_branch, prop_labor,
+)
+assert adds == [], adds
+assert removes == ["rec-provo-2"], removes  # least-loaded provo crew
+
+print("check_recommend: PASS (adjustments)")

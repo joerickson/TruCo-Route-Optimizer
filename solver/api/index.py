@@ -24,6 +24,7 @@ Vercel Python uses the BaseHTTPRequestHandler-style handler convention.
 from __future__ import annotations
 
 import json
+import math
 import os
 import sys
 import time
@@ -352,7 +353,6 @@ def _bin_pack_branch(props: list[dict[str, Any]], branch_id: str) -> list[dict[s
     for p in sorted(props, key=lambda p: float(p["est_labor_hours"]), reverse=True):
         labor = float(p["est_labor_hours"])
         if labor > _REC_CAP3:  # oversize: dedicated 3-person crews, split evenly
-            import math
             n = math.ceil(labor / _REC_CAP3)
             for _ in range(n):
                 b = open_bin(3)
@@ -381,6 +381,46 @@ def _seed_fleet(properties: list[dict[str, Any]], branches: list[dict[str, Any]]
     for branch_id, props in by_branch.items():
         fleet.extend(_bin_pack_branch(props, branch_id))
     return fleet
+
+
+def _recommend_adjustments(
+    fleet: list[dict[str, Any]],
+    crew_util: list[dict[str, Any]],
+    unassigned_ids: list[str],
+    prop_branch: dict[str, str],
+    prop_labor: dict[str, float],
+) -> tuple[list[tuple[str, int]], list[str]]:
+    """Decide per-branch crew changes after a validate run.
+
+    Returns (adds, removes): `adds` = list of (branch_id, size) crews to add where a
+    branch has uncovered work (size 3 if any uncovered property at that branch exceeds
+    a 2-person crew's weekly capacity, else 2); `removes` = crew ids to drop on
+    branches that are fully covered yet over-provisioned (all crews under the clock
+    floor and more than one crew)."""
+    util_by_crew = {u["crew_id"]: float(u["clock_hours"]) for u in crew_util}
+    crews_by_branch: dict[str, list[dict[str, Any]]] = {}
+    for c in fleet:
+        crews_by_branch.setdefault(c["home_branch_id"], []).append(c)
+
+    unassigned_by_branch: dict[str, list[str]] = {}
+    for pid in unassigned_ids:
+        b = prop_branch.get(pid)
+        if b is not None:
+            unassigned_by_branch.setdefault(b, []).append(pid)
+
+    adds: list[tuple[str, int]] = []
+    for branch_id, pids in unassigned_by_branch.items():
+        size = 3 if any(prop_labor.get(pid, 0.0) > _REC_CAP2 for pid in pids) else 2
+        adds.append((branch_id, size))
+
+    removes: list[str] = []
+    if not unassigned_ids:  # only trim when everything is covered
+        for branch_id, crews in crews_by_branch.items():
+            if len(crews) > 1 and all(util_by_crew.get(c["id"], 0.0) < _REC_OVER_PROVISIONED_CLOCK for c in crews):
+                least = min(crews, key=lambda c: util_by_crew.get(c["id"], 0.0))
+                removes.append(least["id"])
+
+    return adds, removes
 
 
 def _classify_capacity(avg_clock_per_crew: float) -> tuple[str, str]:
