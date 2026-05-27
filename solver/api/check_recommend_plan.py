@@ -154,7 +154,7 @@ result2, extra2, _, vcount2 = _cover_residual(
     [crew("a", "slc", 2)], _by_branch, _prop_labor, BN, _never_covers, max_rounds=5)
 assert result2["unassigned_property_ids"] == ["slc-b"], result2  # surfaced as a true limit
 assert vcount2 <= 3, vcount2                                     # bailed on no-improvement, not 5 rounds
-assert extra2.get("slc", {}).get("two", 0) == 1, extra2          # spent one attempt-buy before bailing
+assert extra2.get("slc", {}).get("two", 0) == 0, extra2          # the probe didn't help -> rolled back, 0 added
 
 # --- _cover_residual buys a 3-person crew when the stranded property exceeds CAP2 ---
 def _validate_big(crews):
@@ -174,5 +174,24 @@ result4, extra4, _, vcount4 = _cover_residual(
     [crew("a", "slc", 2)], _by_branch, _prop_labor, BN, _orphan_validate, max_rounds=5)
 assert extra4 == {}, extra4                                      # nothing bought for an orphan prop
 assert vcount4 == 1, vcount4                                     # initial validate only; loop breaks immediately
+
+# --- per-branch termination: a branch whose work is un-routable gets 0 crews even while
+#     ANOTHER branch keeps improving (the global-count bug bought crews at the dead-end branch) ---
+_bb = {"good": [{"id": "g1", "est_labor_hours": 40.0}, {"id": "g2", "est_labor_hours": 40.0}],
+       "bad":  [{"id": "b1", "est_labor_hours": 40.0}]}  # b1 never coverable (e.g. beyond daily reach)
+_pl = {"g1": 40.0, "g2": 40.0, "b1": 40.0}
+def _val_mixed(crews):
+    # each bought "good" crew covers one good prop; bad stays stranded no matter what.
+    bought_good = sum(1 for c in crews if str(c["id"]).startswith("rec-good-"))
+    un = ["b1"]
+    if bought_good < 1:
+        un += ["g1", "g2"]
+    elif bought_good < 2:
+        un += ["g2"]
+    return {"crew_utilization": [], "unassigned_property_ids": un}
+result5, extra5, _, _ = _cover_residual([crew("x", "good", 2)], _bb, _pl, BN, _val_mixed, max_rounds=5)
+assert extra5.get("good", {}).get("two", 0) == 2, extra5    # good keeps the 2 crews that helped it
+assert "bad" not in extra5, extra5                          # bad's probe didn't help -> rolled back, 0 added
+assert result5["unassigned_property_ids"] == ["b1"], result5  # un-routable work surfaced, not chased
 
 print("check_recommend_plan: PASS")

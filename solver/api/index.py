@@ -762,10 +762,14 @@ def _cover_residual(
 ) -> tuple[dict[str, Any], dict[str, dict[str, int]], list[dict[str, Any]], int]:
     """Close the loop between the planner's aggregate model and the real routing solve.
 
-    Validate the proposed fleet; for every routable-but-stranded property, buy a crew at the
-    property's branch (3-person if any stranded property there exceeds CAP2, else 2-person) and
-    re-validate. Stop when nothing is stranded, the round budget is spent, or a round fails to
-    reduce the unassigned count (genuinely un-routable -> surfaced as a true limit). Returns
+    Validate the proposed fleet, then probe PER BRANCH: each round, buy ONE crew at every branch
+    that still has a stranded, attributable property and isn't already exhausted; re-validate; keep
+    a probe only if it reduced THAT branch's own stranded count, otherwise roll it back and stop
+    buying there. This prevents over-buying at a branch whose remaining properties are un-routable
+    (e.g. beyond daily drive range): such work is surfaced as a true geographic/capacity limit
+    instead of being chased with crews that never help. Termination is therefore decided per branch,
+    not on the global unassigned count (a branch whose work can't be reduced no longer drags crews
+    in just because some OTHER branch is still improving). Returns
     (final_result, extra_additions_by_branch, proposed_crews_incl_bought, validate_count).
     """
     prop_branch = {p["id"]: bid for bid, props in by_branch.items() for p in props}
@@ -777,34 +781,55 @@ def _cover_residual(
     if not crews:
         return {"crew_utilization": [], "unassigned_property_ids": []}, extra, crews, 0
 
+    def stranded_by_branch(res: dict[str, Any]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for pid in (res.get("unassigned_property_ids", []) or []):
+            bid = prop_branch.get(pid)  # ignore unattributable (orphan) properties
+            if bid is not None:
+                counts[bid] = counts.get(bid, 0) + 1
+        return counts
+
     result = validate(crews)
     validate_count += 1
 
+    exhausted: set[str] = set()
     rounds = 0
     while rounds < max_rounds:
-        unassigned = result.get("unassigned_property_ids", []) or []
-        actionable = [pid for pid in unassigned if pid in prop_branch]
-        if not actionable:
+        before = stranded_by_branch(result)
+        targets = [bid for bid, n in before.items() if n > 0 and bid not in exhausted]
+        if not targets:
             break
-        prev_count = len(unassigned)
-        by_b: dict[str, list[str]] = {}
-        for pid in actionable:
-            by_b.setdefault(prop_branch[pid], []).append(pid)
-        for bid, pids in by_b.items():
-            big = any(prop_labor.get(pid, 0.0) > _REC_CAP2 for pid in pids)
-            size = 3 if big else 2
+        unassigned = result.get("unassigned_property_ids", []) or []
+        probes: dict[str, tuple[str, int]] = {}  # branch_id -> (probe crew id, size) bought this round
+        for bid in targets:
+            pids = [pid for pid in unassigned if prop_branch.get(pid) == bid]
+            size = 3 if any(prop_labor.get(pid, 0.0) > _REC_CAP2 for pid in pids) else 2
             k = new_idx.get(bid, 0) + 1
             new_idx[bid] = k
             # offset index keeps these ids distinct from planner-bought rec crews
-            crews.append(_make_rec_crew(bid, _REC_LOOP_CREW_ID_OFFSET + k, size, branch_name.get(bid, bid)))
-            sk = "three" if size == 3 else "two"
-            extra.setdefault(bid, {})
-            extra[bid][sk] = extra[bid].get(sk, 0) + 1
+            crew = _make_rec_crew(bid, _REC_LOOP_CREW_ID_OFFSET + k, size, branch_name.get(bid, bid))
+            crews.append(crew)
+            probes[bid] = (crew["id"], size)
         rounds += 1
         result = validate(crews)
         validate_count += 1
-        if len(result.get("unassigned_property_ids", []) or []) >= prev_count:
-            break  # no improvement => remaining stranded work is genuinely un-routable
+        after = stranded_by_branch(result)
+        rolled_back = False
+        for bid, (cid, size) in probes.items():
+            if after.get(bid, 0) < before.get(bid, 0):
+                # the probe reduced this branch's stranded work -> keep it; branch stays active
+                sk = "three" if size == 3 else "two"
+                extra.setdefault(bid, {})
+                extra[bid][sk] = extra[bid].get(sk, 0) + 1
+            else:
+                # no improvement at this branch -> its remaining work is un-routable; undo + stop here
+                crews = [c for c in crews if c["id"] != cid]
+                exhausted.add(bid)
+                rolled_back = True
+        if rolled_back:
+            # reconcile the result with the cleaned fleet so the returned result matches `crews`
+            result = validate(crews)
+            validate_count += 1
     return result, extra, crews, validate_count
 
 
