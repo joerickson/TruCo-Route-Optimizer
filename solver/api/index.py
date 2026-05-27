@@ -34,7 +34,7 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
-from typing import Any
+from typing import Any, Callable
 
 # @vercel/python doesn't add the entrypoint's directory to sys.path, so sibling
 # .py files in api/ can't be imported by name without this. Without it,
@@ -92,6 +92,9 @@ _REC_CAP2_TIGHT = _REC_USABLE_FRACTION * _REC_TIGHT_CLOCK_PER_WEEK * 2  # ~93.5
 _REC_CAP3_TIGHT = _REC_USABLE_FRACTION * _REC_TIGHT_CLOCK_PER_WEEK * 3  # ~140.25
 _REC_DEFAULT_CREW_CAPEX_USD = 110_000.0
 _REC_CLUSTER_RADIUS_MILES = 60.0  # branches within this road-distance are one commute cluster
+# Crews bought by the coverage loop use this id offset so they never collide with planner-bought
+# rec crews (those start at k=1; the planner buys at most demand/_REC_CAP2 per branch, far below 900).
+_REC_LOOP_CREW_ID_OFFSET = 900
 
 
 def _day_capacities(
@@ -717,7 +720,10 @@ def _apply_extra_additions(
     capex_usd: float,
 ) -> dict[str, Any]:
     """Fold crews bought during the coverage loop back into an assembled plan dict (in place):
-    per-branch added/crews_after, changes.additions, and totals (new_crews/fleet_after/net_capital)."""
+    per-branch added/crews_after, changes.additions, and totals (new_crews/fleet_after/net_capital).
+
+    Call once per plan with the full set of loop-bought crews. NOT idempotent: calling twice with
+    the same `extra` double-counts new_crews and corrupts net_capital."""
     total_new = 0
     for bid, sizes in extra.items():
         b = plan["branches"].setdefault(bid, {
@@ -751,7 +757,7 @@ def _cover_residual(
     by_branch: dict[str, list[dict[str, Any]]],
     prop_labor: dict[str, float],
     branch_name: dict[str, str],
-    validate,
+    validate: Callable[[list[dict[str, Any]]], dict[str, Any]],
     max_rounds: int = _REC_MAX_RUNS,
 ) -> tuple[dict[str, Any], dict[str, dict[str, int]], list[dict[str, Any]], int]:
     """Close the loop between the planner's aggregate model and the real routing solve.
@@ -790,7 +796,7 @@ def _cover_residual(
             k = new_idx.get(bid, 0) + 1
             new_idx[bid] = k
             # offset index keeps these ids distinct from planner-bought rec crews
-            crews.append(_make_rec_crew(bid, 900 + k, size, branch_name.get(bid, bid)))
+            crews.append(_make_rec_crew(bid, _REC_LOOP_CREW_ID_OFFSET + k, size, branch_name.get(bid, bid)))
             sk = "three" if size == 3 else "two"
             extra.setdefault(bid, {})
             extra[bid][sk] = extra[bid].get(sk, 0) + 1

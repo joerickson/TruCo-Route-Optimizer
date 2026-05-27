@@ -154,5 +154,25 @@ result2, extra2, _, vcount2 = _cover_residual(
     [crew("a", "slc", 2)], _by_branch, _prop_labor, BN, _never_covers, max_rounds=5)
 assert result2["unassigned_property_ids"] == ["slc-b"], result2  # surfaced as a true limit
 assert vcount2 <= 3, vcount2                                     # bailed on no-improvement, not 5 rounds
+assert extra2.get("slc", {}).get("two", 0) == 1, extra2          # spent one attempt-buy before bailing
+
+# --- _cover_residual buys a 3-person crew when the stranded property exceeds CAP2 ---
+def _validate_big(crews):
+    # slc-a (90h > CAP2 85) stranded until a crew is bought at slc.
+    bought_at_slc = sum(1 for c in crews if str(c["id"]).startswith("rec-slc-"))
+    return {"crew_utilization": [], "unassigned_property_ids": [] if bought_at_slc >= 1 else ["slc-a"]}
+result3, extra3, _, _ = _cover_residual(
+    [crew("a", "slc", 2)], _by_branch, _prop_labor, BN, _validate_big, max_rounds=5)
+assert result3["unassigned_property_ids"] == [], result3
+assert extra3.get("slc", {}).get("three", 0) == 1, extra3        # big stranded prop => 3-person buy
+assert extra3.get("slc", {}).get("two", 0) == 0, extra3
+
+# --- _cover_residual ignores an unattributable stranded property (not in any branch) ---
+def _orphan_validate(crews):
+    return {"crew_utilization": [], "unassigned_property_ids": ["pid-not-in-by-branch"]}
+result4, extra4, _, vcount4 = _cover_residual(
+    [crew("a", "slc", 2)], _by_branch, _prop_labor, BN, _orphan_validate, max_rounds=5)
+assert extra4 == {}, extra4                                      # nothing bought for an orphan prop
+assert vcount4 == 1, vcount4                                     # initial validate only; loop breaks immediately
 
 print("check_recommend_plan: PASS")
