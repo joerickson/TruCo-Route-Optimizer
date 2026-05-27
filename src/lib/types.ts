@@ -139,3 +139,39 @@ export interface OptimizationRun {
   created_by: string | null;
   created_at: string;
 }
+
+export interface BranchRecommendation {
+  branch_id: string;
+  branch_name: string;
+  two_person: number;
+  three_person: number;
+  total_people: number;
+  demand_hours: number;
+  avg_util_pct: number;
+  drivers_three_person: string[];
+  split_properties: string[];
+}
+
+export interface RecommendationResult {
+  branches: BranchRecommendation[];
+  totals: {
+    two_person: number;
+    three_person: number;
+    total_crews: number;
+    total_people: number;
+    demand_hours: number;
+  };
+  unattributable_property_ids: string[];
+  residual_unassigned: { count: number; labor_hours: number };
+}
+
+export interface CrewRecommendation {
+  id: string;
+  name: string | null;
+  status: RunStatus;
+  result_jsonb: RecommendationResult | null;
+  iterations: number | null;
+  solver_runtime_seconds: number | null;
+  failure_reason: string | null;
+  created_at: string;
+}
