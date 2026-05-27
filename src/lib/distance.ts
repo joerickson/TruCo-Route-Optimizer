@@ -17,9 +17,28 @@ export function roadMiles(a: { lat: number; lng: number }, b: { lat: number; lng
   return haversineMiles(a, b) * ROAD_FACTOR;
 }
 
-// Assumed average suburban/urban speed for landscape crews.
-const AVG_SPEED_MPH = 30;
+// Distance-tiered effective speed, mirrored from the Python solver's distance_matrix.py:
+// short in-neighborhood hops crawl, longer trips reach arterial then freeway speed. Modeled as
+// CUMULATIVE segments on road-distance so travel time is strictly increasing with distance.
+// Each tuple is [segmentUpperBoundMiles, mph].
+const SPEED_TIERS: ReadonlyArray<readonly [number, number]> = [
+  [3, 25], // first 3 road-mi: neighborhood streets
+  [12, 40], // next 3-12 road-mi: arterials
+  [Infinity, 65], // beyond 12 road-mi: freeway
+];
+
+export function roadMinutes(roadMi: number): number {
+  let minutes = 0;
+  let lower = 0;
+  for (const [upper, mph] of SPEED_TIERS) {
+    if (roadMi <= lower) break;
+    const seg = Math.min(roadMi, upper) - lower;
+    minutes += (seg / mph) * 60;
+    lower = upper;
+  }
+  return minutes;
+}
 
 export function driveMinutes(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
-  return (roadMiles(a, b) / AVG_SPEED_MPH) * 60;
+  return roadMinutes(roadMiles(a, b));
 }

@@ -13,7 +13,17 @@ from typing import Sequence
 
 ROAD_FACTOR = 1.3
 EARTH_RADIUS_MI = 3958.8
-AVG_SPEED_MPH = 30.0  # suburban/urban assumed average for landscape crews
+
+# Distance-tiered effective speed: short in-neighborhood hops crawl between stops/lights,
+# longer trips get on arterials and then the freeway. Modeled as CUMULATIVE segments on the
+# road-distance (haversine x ROAD_FACTOR) so travel time is strictly increasing with distance
+# (a flat per-tier speed would make a 12.1-mi trip *faster* than an 11.9-mi one and break the
+# routing solver's distance ordering). Each tuple is (segment_upper_bound_miles, mph).
+_SPEED_TIERS = (
+    (3.0, 25.0),    # first 3 road-mi: neighborhood streets
+    (12.0, 40.0),   # next 3-12 road-mi: arterials
+    (float("inf"), 65.0),  # beyond 12 road-mi: freeway
+)
 
 
 def haversine_miles(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
@@ -25,9 +35,21 @@ def haversine_miles(lat1: float, lng1: float, lat2: float, lng2: float) -> float
     return EARTH_RADIUS_MI * 2 * math.asin(math.sqrt(a))
 
 
+def road_minutes(road_miles: float) -> float:
+    """Drive minutes for a given road distance using the cumulative tiered-speed model."""
+    minutes = 0.0
+    lower = 0.0
+    for upper, mph in _SPEED_TIERS:
+        if road_miles <= lower:
+            break
+        seg = min(road_miles, upper) - lower
+        minutes += (seg / mph) * 60.0
+        lower = upper
+    return minutes
+
+
 def drive_minutes(lat1: float, lng1: float, lat2: float, lng2: float) -> float:
-    miles = haversine_miles(lat1, lng1, lat2, lng2) * ROAD_FACTOR
-    return (miles / AVG_SPEED_MPH) * 60.0
+    return road_minutes(haversine_miles(lat1, lng1, lat2, lng2) * ROAD_FACTOR)
 
 
 def build_matrix(coords: Sequence[tuple[float, float]]) -> list[list[int]]:

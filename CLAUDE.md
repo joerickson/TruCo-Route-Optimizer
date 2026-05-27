@@ -37,7 +37,7 @@ The two questions it answers:
 - **Seasonality**: most contracts run **Apr–Nov** (mowing season), some year-round. **Peak summer week is the binding capacity constraint** — that's what the optimizer targets.
 - **Sustainable workload bands** (clock-hrs/crew/week): `<40` over-provisioned · `40–50` sustainable · `50–55` tight · `55–60` add 1–2 crews · `>60` unsustainable. Defined in `solver/api/solver.py::_classify_capacity` and mirrored in `src/app/capacity/page.tsx`.
 - **Same-day-of-week service**: soft constraint. First run picks the day; subsequent runs honor `assigned_day_of_week` unless utilization is materially better by moving.
-- **Travel time**: Haversine × 1.3 road factor at 30 mph. Documented in the UI. Sufficient for capacity planning; not for actual navigation.
+- **Travel time**: Haversine × 1.3 road factor, with **distance-tiered speed** (≤3 road-mi @ 25 mph, 3–12 @ 40 mph, >12 @ 65 mph, cumulative so time is monotonic in distance) — short in-neighborhood hops crawl, long hauls use freeway speed. Defined once in `solver/api/distance_matrix.py` and mirrored in `src/lib/distance.ts` (keep in sync). Sufficient for capacity planning; not for actual navigation.
 - **Bi-weekly properties** are visited every week in the routing model (we optimize a representative week, not multi-week alternation).
 
 ## State of the codebase
