@@ -506,6 +506,11 @@ def _plan_fleet_changes(
         n = len(crews_at.get(bid, []))
         return baseline_clock.get(bid, 0.0) / n if n else 0.0
 
+    def keeps_coverage(c) -> bool:
+        # Removing c must leave its home branch able to cover its own attributed demand.
+        bid = c["home_branch_id"]
+        return branch_cap(bid) - cap_of(c) >= demand.get(bid, 0.0)
+
     moved_ids: set[str] = set()
 
     cluster_of = clusters or {}
@@ -519,8 +524,10 @@ def _plan_fleet_changes(
         # None == None treating two unknown branches as relocatable).
         return ca is not None and ca == cb
 
-    def sources():  # idle crews at non-short branches (not yet moved), biggest first then name
-        out = [c for c in crews if is_idle(c) and deficit(c["home_branch_id"]) <= 0 and c["id"] not in moved_ids]
+    def sources():  # idle, removable crews at non-short branches (not yet moved), biggest first then name
+        out = [c for c in crews
+               if is_idle(c) and deficit(c["home_branch_id"]) <= 0
+               and c["id"] not in moved_ids and keeps_coverage(c)]
         out.sort(key=lambda c: (-cap_of(c), c.get("name", "")))
         return out
 
@@ -599,10 +606,22 @@ def _plan_fleet_changes(
         if not moved:
             break
 
-    # Surplus: idle crews with no beneficial target (flagged, never disbanded).
+    # Surplus: idle crews a branch could shed while still covering its own demand, that
+    # weren't relocated (no useful same-cluster target). These are honest downsize candidates;
+    # a branch's last needed crew is NOT surplus.
     surplus: dict[str, int] = {}
-    for s in sources():
-        surplus[s["home_branch_id"]] = surplus.get(s["home_branch_id"], 0) + 1
+    for bid in branch_ids:
+        idle_here = [c for c in crews_at.get(bid, []) if is_idle(c)]
+        if not idle_here:
+            continue
+        cap = branch_cap(bid)
+        removable = 0
+        for c in sorted(idle_here, key=cap_of):  # drop smallest first to maximize count kept honest
+            if cap - cap_of(c) >= demand.get(bid, 0.0):
+                cap -= cap_of(c)
+                removable += 1
+        if removable:
+            surplus[bid] = removable
 
     # --- assemble output ---
     def counts(crew_list):

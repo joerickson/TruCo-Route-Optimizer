@@ -12,21 +12,20 @@ def crew(cid, bid, size=2):
 def props(bid, *hours):
     return [{"id": f"{bid}-p{i}", "est_labor_hours": h} for i, h in enumerate(hours)]
 
-# --- no over-provisioning: small branch with idle crew + routing artifact -> no change ---
+# --- no over-provisioning: small branch, single crew is NEEDED for its 78h -> not surplus, no change ---
 by_branch = {"stg": props("stg", 78.0)}                  # demand 78 < CAP2_TIGHT 93.5
 plan = _plan_fleet_changes([crew("c1", "stg", 2)], by_branch, {"c1": 18.0}, BN, 110000)
 assert plan["totals"]["new_crews"] == 0, plan["totals"]
 assert plan["changes"]["upsizes"] == [] and plan["changes"]["additions"] == [], plan["changes"]
-# idle crew, but every branch <=50 => surplus (not relocated, not bought)
-assert plan["changes"]["surplus_idle"] == [{"branch_name": "St George", "count": 1}], plan["changes"]
+assert plan["changes"]["surplus_idle"] == [], plan["changes"]   # the lone crew is needed for 78h
 
-# --- relocate-first: short branch + idle crew elsewhere -> relocate ($0), no buy ---
+# --- relocate-first: short branch + a SURPLUS idle crew elsewhere (same cluster) -> relocate ($0) ---
 by_branch = {"slc": props("slc", 200.0), "stg": props("stg", 10.0)}
-crews = [crew("a", "slc", 3), crew("idle", "stg", 3)]    # slc deficit (200 > 140.25), stg idle
-plan = _plan_fleet_changes(crews, by_branch, {"a": 52.0, "idle": 8.0}, BN, 110000)
-assert plan["totals"]["new_crews"] == 0, plan["totals"]
+crews = [crew("a", "slc", 3), crew("s1", "stg", 3), crew("s2", "stg", 3)]  # stg has 2; 1 is spare
+plan = _plan_fleet_changes(crews, by_branch, {"a": 60.0, "s1": 6.0, "s2": 6.0}, BN, 110000)
 reloc = plan["changes"]["relocations"]
 assert any(r["to_branch_name"] == "SLC HQ" and r["reason"] == "deficit" for r in reloc), reloc
+assert plan["branches"]["stg"]["crews_after"]["three"] == 1, plan["branches"]["stg"]  # stg keeps 1 for its 10h
 
 # --- upsize-before-buy: short branch, no sources, has a 2-person crew -> upsize ---
 by_branch = {"slc": props("slc", 130.0)}                 # 130 > CAP2_TIGHT 93.5, < CAP3_TIGHT 140.25
@@ -41,12 +40,14 @@ assert plan["totals"]["new_crews"] >= 1, plan["totals"]
 assert any(a["size"] == 3 for a in plan["changes"]["additions"]), plan["changes"]
 assert plan["totals"]["net_capital_usd"] == plan["totals"]["new_crews"] * 110000, plan["totals"]
 
-# --- rebalance: no deficit, idle crew at <=40 branch, another branch avg >50 -> relocate(rebalance) ---
+# --- rebalance: no deficit; a branch with a SURPLUS idle crew feeds a loaded same-cluster branch ---
 by_branch = {"slc": props("slc", 90.0), "stg": props("stg", 5.0)}
-crews = [crew("busy", "slc", 2), crew("idle", "stg", 2)]
-plan = _plan_fleet_changes(crews, by_branch, {"busy": 58.0, "idle": 6.0}, BN, 110000)
-assert any(r["reason"] == "rebalance" and r["to_branch_name"] == "SLC HQ" for r in plan["changes"]["relocations"]), plan["changes"]
+crews = [crew("busy", "slc", 2), crew("s1", "stg", 2), crew("s2", "stg", 2)]  # stg has 2; 1 spare
+plan = _plan_fleet_changes(crews, by_branch, {"busy": 58.0, "s1": 6.0, "s2": 6.0}, BN, 110000)
+assert any(r["reason"] == "rebalance" and r["to_branch_name"] == "SLC HQ"
+           for r in plan["changes"]["relocations"]), plan["changes"]
 assert plan["totals"]["new_crews"] == 0, plan["totals"]
+assert plan["branches"]["stg"]["crews_after"]["two"] == 1, plan["branches"]["stg"]  # stg keeps 1 for its 5h
 
 # --- capex echo + name format ---
 assert _make_rec_crew("lin", 1, 3, "Lindon")["name"] == "Lindon · 3p #1"
@@ -94,5 +95,15 @@ plan = _plan_fleet_changes(crews, by_branch, {"busy": 58.0, "idle": 6.0}, BN, 11
                            clusters=clusters)
 assert plan["changes"]["relocations"] == [], plan["changes"]   # no cross-cluster rebalance
 assert plan["totals"]["new_crews"] == 0, plan["totals"]
+
+# --- coverage floor: branch with 3 idle crews / 78h keeps 1, flags 2 as surplus; never drained to 0 ---
+by_branch = {"stg": props("stg", 78.0)}
+crews = [crew("c1", "stg", 2), crew("c2", "stg", 3), crew("c3", "stg", 3)]
+clusters = {"stg": "stg"}  # singleton; nowhere to relocate
+plan = _plan_fleet_changes(crews, by_branch, {"c1": 14.0, "c2": 14.0, "c3": 14.0}, BN, 110000,
+                           clusters=clusters)
+after = plan["branches"]["stg"]["crews_after"]
+assert after["two"] + after["three"] == 3, after          # nobody relocated (singleton cluster)
+assert plan["changes"]["surplus_idle"] == [{"branch_name": "St George", "count": 2}], plan["changes"]
 
 print("check_recommend_plan: PASS")
