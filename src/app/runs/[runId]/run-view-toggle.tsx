@@ -10,16 +10,18 @@ const VIEWS: Array<{ value: 'list' | 'map' | 'calendar'; label: string }> = [
 export function RunViewToggle({
   runId,
   current,
+  branch,
 }: {
   runId: string;
   current: 'list' | 'map' | 'calendar';
+  branch?: string | null;
 }) {
   return (
     <div className="inline-flex rounded-md border bg-background p-0.5 text-sm">
       {VIEWS.map((v) => (
         <Link
           key={v.value}
-          href={`/runs/${runId}?view=${v.value}`}
+          href={`/runs/${runId}?view=${v.value}${branch ? `&branch=${branch}` : ''}`}
           aria-current={current === v.value ? 'page' : undefined}
           className={cn(
             'rounded px-3 py-1.5 transition-colors',
