@@ -1,167 +1,211 @@
-# Crew-Mix Recommender (analytical, v1) — Design Spec
+# Crew-Mix Recommender (solver-in-the-loop) — Design Spec
 
 **Date:** 2026-05-26
 **Status:** Approved (design)
-**Scope:** Given the property portfolio and branches, recommend **how many crews per
-branch and the 2-/3-person mix** that covers all the work at sustainable utilization
-for the lowest cost — by analytical capacity bin-packing, no routing-solver runs.
-
-Inverts the current model: today crews are fixed inputs the solver routes against;
-this recommends the fleet to run.
+**Scope:** Recommend **how many crews per branch and the 2-/3-person mix** that covers
+the whole property portfolio at sustainable utilization for the lowest cost. An
+**analytical seed** proposes a fleet; the **existing solver validates it with real
+drive/routing** and a bounded loop adjusts crews until coverage + sustainable
+utilization are met. Inverts the model: today crews are fixed inputs; this
+recommends the fleet to run.
 
 ## 1. Goal
 
-Answer "what fleet should we run?" Per branch, output **N two-person + M
-three-person crews** such that:
-- every property's weekly labor is covered, and
-- every crew sits in the sustainable band (≤ ~50 clock-hrs/wk),
-- at the **lowest cost** (fewest people / least wasted crew capacity).
+Per branch, output **N two-person + M three-person crews** such that every
+property's labor is covered, every crew sits in the sustainable band, at the fewest
+people — with the crew **count grounded in real drive time** (via the solver), not a
+flat approximation, and the **mix** driven by per-property weekly capacity (a
+property above a 2-person crew's weekly ceiling needs a 3-person crew).
 
-The 2-vs-3 mix is meaningful because of a **weekly capacity ceiling**: a 2-person
-crew delivers ~100 person-hrs/wk sustainably, a 3-person ~150. A property whose
-weekly labor exceeds a 2-person crew's weekly capacity (e.g. Canyon Park at 132.6
-ph/wk) **cannot be finished by a 2-person crew** and forces a 3-person crew. So the
-mix is driven by the **property-size distribution**, which is analytically
-computable — no solver sweep, no drive-time modeling required for the recommendation.
+Success: a recommendation a planner can act on, validated by the same routing engine
+that runs day-to-day, with residual unassigned work (if any) flagged as a true
+capacity limit.
 
-### Out of scope (v1)
-- Routing-solver validation/sweep of the recommended fleet (the deferred "~50×
-  runs" problem). The recommendation is analytical; a user can manually run the
-  existing optimizer with the recommended crews to sanity-check. Auto-validation is
-  a possible later iteration.
-- Drive-time-optimal mix refinement (would need the solver). v1's mix is driven by
-  capacity feasibility + packing, not routing cost.
+### Out of scope
+- Provably-global optimum. This is a good analytical seed + bounded solver-validated
+  local search (the honest tradeoff vs a full ~50× sweep).
+- Frequency-weighting demand (v1 counts every active property weekly, matching the
+  solver's representative-week model; documented iterate point).
 - "Suggest new branch location" (separate deferred item).
-- Changing the solver, schema, or any existing behavior. This is purely additive.
+- Changing `optimize`/`evaluate` solver behavior (only an additive `time_limit`
+  param, default-preserving) or the web's existing pages.
 
 ## 2. Background / current state
 
-- `branches` (lat/lng, is_active), `crews` (crew_size, max_clock_hours_per_day,
-  works_* days, home_branch_id), `properties` (est_labor_hours = per-visit
-  person-hours, service_type weekly/biweekly/monthly, lat/lng, preferred_branch_id).
-- Sustainable band (CLAUDE.md): `40–50` sustainable, `50–55` tight, `>55` add crews.
-- `src/lib/distance.ts` has `haversineMiles` for nearest-branch attribution.
-- The solver routes a **representative peak week** visiting all active properties
-  once (it does not down-weight biweekly/monthly today). v1 matches this (see §3.2).
+- Solver (`solver/api/index.py`): `run_optimization(payload{crews,branches,properties})`
+  routes a representative peak week (crew-size-aware, chunked, cross-day rebalance),
+  returning `crew_utilization` (per-crew weekly `clock_hours`, `util_pct`,
+  `props_assigned`) + `unassigned_property_ids`. `do_POST` dispatches on
+  `payload["mode"]` (`optimize` default, `evaluate`). `_crews_for_day` reads crew
+  `works_<day>`, `home_branch_id`, `max_clock_hours_per_day`, `crew_size`.
+  `_aggregate_result` derives `max_weekly` from `works_*` × `max_clock_hours_per_day`.
+- `distance_matrix.py` has `haversine_miles(lat1,lng1,lat2,lng2)`.
+- Schema: `branches`(lat/lng,is_active), `properties`(est_labor_hours, service_type,
+  lat/lng, preferred_branch_id), `crews`(crew_size, max_clock_hours_per_day, works_*,
+  home_branch_id). Web triggers the solver via `PYTHON_SOLVER_URL`, fire-and-forget,
+  polling the result row (see `optimize/actions.ts`).
+- Sustainable band (CLAUDE.md): `40–50` sustainable · `50–55` tight · `>55` add crews.
 
-## 3. Model & assumptions
+## 3. Architecture
 
-All constants are **named and tunable** (this is a "test and iterate" feature).
+A new **`recommend` solver mode** does the whole job in one background job; the web
+triggers + polls + renders, mirroring optimization runs.
 
-### 3.1 Property → branch attribution
-Each active, geocoded property is attributed to one branch:
-- its `preferred_branch_id` if that branch is active; else
-- the **nearest active geocoded branch** by Haversine.
-Active properties with no coordinates and no preferred branch are reported as
-**unattributable** (count surfaced, excluded from sizing) — a data-quality signal.
+```
+/recommend page → startRecommendation action:
+   insert crew_recommendations row (status 'running')
+   fire-and-forget POST PYTHON_SOLVER_URL {recommendation_id, mode:'recommend', branches, properties}
+        (no crews — the solver synthesizes them)
+        ↓ solver run_recommendation():
+            seed fleet (analytical bin-pack)  →  synthetic crews
+            loop (≤ MAX_RECOMMEND_RUNS, time cap):
+                run_optimization({synthetic crews, branches, properties}, time_limit=REC)
+                adjust crews per branch from unassigned + utilization; stop if converged
+            PATCH crew_recommendations row with the final fleet + validated metrics
+   page polls the row → renders recommendation
+```
 
-### 3.2 Weekly labor per property
-v1: `weekly_labor = est_labor_hours` for every active property (treated as a weekly
-visit), **matching the solver's representative-week model** (so a recommendation is
-consistent with what the optimizer would be asked to route). This is conservative
-for biweekly/monthly.
-- **Iterate option (documented, not v1):** frequency-weight via
-  `{weekly:1.0, biweekly:0.5, monthly:0.23}` for true average demand. Deferred to
-  keep v1 consistent with the solver and simple.
+## 4. Solver: `recommend` mode (`solver/api/index.py`)
 
-### 3.3 Crew weekly capacity (usable labor person-hours)
-- `SUSTAINABLE_CLOCK_PER_WEEK = 50` — top of the "sufficient" band (tunable).
-- `USABLE_FRACTION = 0.85` — share of clock-time that is service vs drive (matches
-  the solver's `_DAY_CAPACITY_HEADROOM`; tunable).
-- `cap2 = USABLE_FRACTION × SUSTAINABLE_CLOCK_PER_WEEK × 2` ≈ **85 ph/wk**
-- `cap3 = USABLE_FRACTION × SUSTAINABLE_CLOCK_PER_WEEK × 3` ≈ **127.5 ph/wk**
+`do_POST` adds `mode == "recommend" → run_recommendation(payload)`.
 
-(With these defaults Canyon Park's 132.6 ph slightly exceeds one 3-person crew —
-realistic: it nearly maxes a 3-person crew and tips into needing a split. Tuning
-`USABLE_FRACTION`/`SUSTAINABLE_CLOCK_PER_WEEK` shifts these thresholds; expected
-during iteration.)
+### 4.1 Analytical seed — `_seed_fleet(properties, branches)` (pure)
+- **Attribute** each active geocoded property to a branch: `preferred_branch_id` if
+  that branch is active, else nearest active geocoded branch by `haversine_miles`.
+  No-coords-and-no-preferred → collected as `unattributable` (excluded; surfaced).
+- **Capacities** (named constants): `SUSTAINABLE_CLOCK_PER_WEEK = 50`,
+  `USABLE_FRACTION = 0.85`, `REC_MAX_HOURS_PER_DAY = 10`, `REC_DAYS = 5`.
+  `cap2 = USABLE_FRACTION × SUSTAINABLE_CLOCK_PER_WEEK × 2` (≈85 ph/wk);
+  `cap3 = … × 3` (≈127.5).
+- **Bin-pack per branch** (first-fit-decreasing, weekly_labor = est_labor_hours):
+  property `> cap3` → `ceil(labor/cap3)` dedicated 3-person crews (split); `cap2 <
+  labor ≤ cap3` → a 3-person crew seeded with it; `≤ cap2` → FFD into open bins (fill
+  3-person bins first, else open 2-person bins). Bin type ⇒ crew size.
+- Emit **synthetic crew dicts** consumable by `run_optimization`: `{id:
+  f"rec-{branch_id}-{k}", name, crew_size, home_branch_id: branch_id,
+  max_clock_hours_per_day: REC_MAX_HOURS_PER_DAY, works_monday..works_friday: True,
+  works_saturday/sunday: False}`.
 
-### 3.4 Bin-packing (per branch) — first-fit-decreasing heuristic
-Treat each property as a unit of work preferably handled by **one crew** (the
-operational preference: a crew finishes a property where it fits a crew's week).
-Crews are bins of capacity `cap2` (2-person) or `cap3` (3-person). Goal: cover all
-labor, minimize people.
+### 4.2 Validate
+`run_optimization({"crews": synthetic, "branches": branches, "properties":
+properties}, time_limit_seconds=REC_VALIDATE_SECONDS)`. Add an **optional
+`time_limit_seconds` param to `run_optimization`** (default 8 → optimize/evaluate
+unchanged) threaded through `_solve_days`→`solve_day`; recommend mode passes a
+smaller value (e.g. `REC_VALIDATE_SECONDS = 5`) since we need coverage/util, not
+perfect routes. Result gives per-crew `clock_hours`/`util_pct` and
+`unassigned_property_ids`.
 
-1. **Oversize (`labor > cap3`):** the property can't fit any single crew — allocate
-   `ceil(labor / cap3)` dedicated 3-person crews for it (it will be split across
-   them by the router later). Record it as "split across N crews."
-2. **Needs-3 (`cap2 < labor ≤ cap3`):** must go on a 3-person crew (a 2-person can't
-   finish it). Open a 3-person bin seeded with this property.
-3. **Flexible (`labor ≤ cap2`):** pack first-fit-decreasing — largest first — into
-   any open bin with remaining room (prefer filling already-open 3-person bins to
-   reduce waste, then open 2-person bins). Open a new 2-person bin when nothing fits.
-4. Each crew's recommended size is set by its bin type; report per-crew projected
-   load (Σ packed labor) and utilization (`load / (cap × ... )` → clock-hrs/wk).
+### 4.3 Adjust loop (`run_recommendation`)
+Constants: `MAX_RECOMMEND_RUNS = 5`, `REC_TIME_CAP_SECONDS = 600`,
+`OVER_PROVISIONED_CLOCK = 40` (a crew under this weekly is under-used).
 
-This is a heuristic (exact two-bin-size min-cost packing is NP-hard); good enough for
-a strategic recommendation and easy to iterate. It yields a genuine 2/3 mix: 3-person
-crews only where big properties require them, 2-person for the rest.
+```
+fleet = _seed_fleet(properties, branches)            # synthetic crews
+result = validate(fleet)
+for _round in range(MAX_RECOMMEND_RUNS):
+    if elapsed > REC_TIME_CAP_SECONDS: break
+    unassigned_by_branch = group unassigned_property_ids → their attributed branch
+    changed = False
+    # 1) ADD where work is uncovered
+    for branch with unassigned work:
+        size = 3 if any unassigned property at that branch has labor > cap2 else 2
+        append a synthetic crew of that size at the branch; changed = True
+    # 2) TRIM over-provisioned branches (only when fully covered there)
+    if no unassigned anywhere:
+        for branch whose crews are all < OVER_PROVISIONED_CLOCK and has >1 crew:
+            remove its least-loaded crew (tentative); changed = True
+    if not changed: break
+    result = validate(fleet)
+    # guard: if a trim caused new unassigned, the next ADD step restores it; the
+    #        round cap bounds oscillation.
+final → per-branch counts + metrics
+```
 
-### 3.5 Output (per branch + portfolio)
-Per branch: `{ branchId, branchName, twoPersonCrews, threePersonCrews, totalCrews,
-totalPeople, demandHours, capacityHours, avgUtilPct, driversThreePerson: [property
-names/hours that forced 3-person crews], splitProperties: [names needing >1 crew] }`.
-Portfolio: totals + the unattributable-properties count.
+Converges to: full coverage with crews loaded ≥ sustainable floor where possible, or
+the run/time cap. Residual `unassigned_property_ids` after the cap = a true capacity
+limit the branch geography can't absorb (reported, not hidden).
 
-## 4. Architecture
+### 4.4 Result written to `crew_recommendations`
+`result_jsonb`:
+```
+{
+  branches: [ { branch_id, branch_name, two_person, three_person, total_people,
+                demand_hours, scheduled_hours, avg_util_pct,
+                drivers_three_person: [property names that forced 3-person],
+                split_properties: [names needing >1 crew] } ],
+  totals: { two_person, three_person, total_crews, total_people, demand_hours },
+  unattributable_property_ids: [...],
+  residual_unassigned: { count, labor_hours },
+}
+```
+plus `iterations`, `solver_runtime_seconds`. PATCH via the existing `_supabase_patch`
+helper (extended to target `crew_recommendations`), status `completed`/`failed`.
 
-- **`src/lib/crew-recommender.ts`** (pure, no IO, unit-tested): the model.
-  - `attributeToBranches(properties, branches) → Record<branchId, Property[]>` + unattributable list (uses `haversineMiles` from `./distance`).
-  - `recommendCrews(propsForBranch, caps) → BranchRecommendation` (the bin-packing).
-  - `buildFleetRecommendation(properties, branches, config) → FleetRecommendation` (orchestrates attribution + per-branch packing + portfolio totals). `config` carries the tunable constants with the §3.3 defaults.
-- **`src/app/recommend/page.tsx`** (server component): loads active branches +
-  active geocoded properties via `getServerClient`, calls `buildFleetRecommendation`,
-  renders. Add a `Recommend` (or "Fleet plan") link to `top-nav.tsx`.
-- Presentational components for the per-branch table + portfolio summary
-  (`recommend-table.tsx`), mirroring existing Card/Table usage.
+## 5. Storage — migration (new table)
 
-No solver, no Python, no DB/schema change, no migration.
+```sql
+create table if not exists crew_recommendations (
+  id uuid primary key default gen_random_uuid(),
+  name text,
+  status text not null default 'pending'
+    check (status in ('pending','running','completed','failed')),
+  active_branch_ids uuid[],
+  active_property_ids uuid[],
+  config_snapshot jsonb,
+  result_jsonb jsonb,
+  iterations int,
+  solver_runtime_seconds numeric,
+  failure_reason text,
+  started_at timestamp with time zone,
+  completed_at timestamp with time zone,
+  created_at timestamp with time zone default now()
+);
+create index if not exists crew_recommendations_created_idx
+  on crew_recommendations(created_at desc);
+```
+Never auto-applied — paste-ready SQL ships in the implementation response; run via
+`supabase db push` before deploy.
 
-## 5. UI
+## 6. Web (`src/app/recommend/`)
 
-A `/recommend` page:
-- Headline: "Recommended fleet: X crews (Y two-person, Z three-person) across N
-  branches to cover ~D person-hours/week sustainably."
-- Per-branch table: Branch · demand (ph/wk) · 2-person · 3-person · total people ·
-  avg util · what drove the 3-person crews.
-- A note listing properties that must split across crews, and any unattributable
-  properties (data fix needed).
-- A short "how this is computed" footnote (capacity assumptions + that it's
-  analytical, validate by running the optimizer with these crews).
+- `actions.ts::startRecommendation` — insert the row (status 'running', active branch/
+  property id snapshots), fire-and-forget POST to `PYTHON_SOLVER_URL` with
+  `mode:'recommend'` + active branches + active geocoded properties; mirrors
+  `optimize/actions.ts` (incl. failure-marking catch).
+- `page.tsx` — a "Recommend fleet" button + the latest recommendation; polls while
+  `running` (reuse the `RunRefresher` pattern); renders the per-branch table +
+  portfolio summary + residual/unattributable notes when `completed`.
+- `recommend-form.tsx` (client, useTransition) + `recommend-table.tsx`
+  (presentational). Add a `Recommend` link to `top-nav.tsx`.
+- A new `OptimizationRun`-like `CrewRecommendation` type in `src/lib/types.ts`.
 
-## 6. Testing
+## 7. Testing
 
-vitest on `crew-recommender.ts` (pure):
-- **attribution:** preferred_branch_id honored when active; else nearest by
-  Haversine; unattributable (no coords, no preferred) collected.
-- **capacity math:** cap2/cap3 from the constants.
-- **bin-packing:**
-  - all small properties (≤ cap2) → only 2-person crews; count = ceil(total/cap2)-ish
-    (FFD), all labor covered.
-  - a `cap2 < labor ≤ cap3` property → exactly one 3-person crew opened for it,
-    small props fill its remaining room.
-  - an oversize property (`> cap3`, e.g. Canyon Park 132.6) → flagged split across
-    `ceil(132.6/cap3)` 3-person crews.
-  - mixed set → sensible 2/3 mix; `driversThreePerson` lists the big properties;
-    total covered labor == input labor (within rounding).
-- **portfolio totals** sum per-branch; unattributable surfaced.
+Pure Python checks (no OR-Tools, via a `solver/api/check_recommend.py` script):
+- `_attribute_to_branches`: preferred honored, else nearest by haversine,
+  unattributable collected.
+- seed bin-pack: all-small → only 2-person crews, all labor covered; a `cap2<labor≤
+  cap3` property → a 3-person crew; oversize (Canyon Park 132.6 > cap3) → split into
+  `ceil` 3-person crews; synthetic crew dicts have the fields `run_optimization`
+  needs (`works_*`, `home_branch_id`, `crew_size`, `max_clock_hours_per_day`).
+- the per-round adjust decision (pure helper): given unassigned-by-branch +
+  per-crew utilization, decides correct add (size) / trim per branch.
+The validate loop (calls `run_optimization`→OR-Tools) and end-to-end are **post-deploy**
+gates (OR-Tools not installed locally) — parse-check + the pure checks locally.
+Web: typecheck/lint/build; page + poll verified manually post-deploy.
 
-Page render + nav verified manually.
+## 8. Risks / iterate points
 
-## 7. Risks / iterate points (expected to tune)
-
-- **Capacity constants** (`SUSTAINABLE_CLOCK_PER_WEEK`, `USABLE_FRACTION`) set the
-  thresholds; the right values come from comparing the recommendation against real
-  runs. Centralized as config for easy tuning.
-- **Weekly-vs-frequency demand (§3.2):** v1 counts every property weekly (matches
-  solver, conservative). Frequency-weighting is the most likely first iteration.
-- **Analytical vs routed:** ignores drive geography, so it can under-count crews for
-  very spread branches (drive eats more than the 0.85 factor). The `USABLE_FRACTION`
-  is the safety margin; validate against an optimizer run for a branch that looks
-  tight.
-- **FFD heuristic** isn't provably min-cost; acceptable for a recommendation. If a
-  branch's mix looks off, that's the place to refine.
-- **Indivisible-property assumption (§3.4):** packs as if one crew finishes a
-  property (the operational preference). Properties > cap3 are the only ones split.
-  This is what makes the mix meaningful; if ops actually splits freely, mix matters
-  less and the model would over-recommend 3-person crews.
+- **Runtime:** ≤ `MAX_RECOMMEND_RUNS` (5) full solves at `REC_VALIDATE_SECONDS` (5)
+  per day ⇒ ~5–12 min. Background job; UI says "this takes several minutes." Bounded
+  by run count + `REC_TIME_CAP_SECONDS`.
+- **Capacity constants** (`SUSTAINABLE_CLOCK_PER_WEEK`, `USABLE_FRACTION`,
+  `OVER_PROVISIONED_CLOCK`) — tune against real recommendations; centralized.
+- **Weekly demand** counts every property weekly (conservative; matches solver).
+  Frequency-weighting is the likely first iteration.
+- **Local search, not global optimum** — good seed + bounded adjust; could miss a
+  cheaper mix. Acceptable for a planning recommendation; documented.
+- **Trim oscillation** — removing a crew may reintroduce unassigned, which the next
+  round re-adds; the round cap bounds it, final state always reflects the last
+  validate (so a bad trim can't ship as "covered" unless re-validated clean).
+- **New table + solver redeploy + migration** — three deploy steps; surface clearly.
