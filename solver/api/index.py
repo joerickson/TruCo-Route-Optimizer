@@ -613,18 +613,21 @@ def _plan_fleet_changes(
     # weren't relocated (no useful same-cluster target). These are honest downsize candidates;
     # a branch's last needed crew is NOT surplus.
     surplus: dict[str, int] = {}
+    surplus_detail: dict[str, dict[str, int]] = {}  # per branch, sizes of the disbandable crews
     for bid in branch_ids:
         idle_here = [c for c in crews_at.get(bid, []) if is_idle(c)]
         if not idle_here:
             continue
         cap = branch_cap(bid)
-        removable = 0
+        detail = {"two": 0, "three": 0}
         for c in sorted(idle_here, key=cap_of):  # drop smallest first to maximize removable (surplus) count
             if cap - cap_of(c) >= demand.get(bid, 0.0):
                 cap -= cap_of(c)
-                removable += 1
+                detail["three" if c["crew_size"] == 3 else "two"] += 1
+        removable = detail["two"] + detail["three"]
         if removable:
             surplus[bid] = removable
+            surplus_detail[bid] = detail
 
     # --- assemble output ---
     def counts(crew_list):
@@ -653,6 +656,8 @@ def _plan_fleet_changes(
         "upsizes": [{"branch_name": branch_name.get(b, b), "count": n} for b, n in upsizes.items()],
         "additions": [{"branch_name": branch_name.get(b, b), "size": s, "count": n} for (b, s), n in additions.items()],
         "surplus_idle": [{"branch_name": branch_name.get(b, b), "count": n} for b, n in surplus.items()],
+        "redeployments": [],  # populated by _redeploy_surplus (post-pass, after the coverage loop)
+        "disbanded": [],
     }
     totals = {
         "fleet_before": len(current_crews),
@@ -661,7 +666,8 @@ def _plan_fleet_changes(
         "capex_usd": float(capex_usd),
         "net_capital_usd": int(new_crews * float(capex_usd)),
     }
-    return {"proposed_crews": crews, "branches": branches_out, "changes": changes, "totals": totals}
+    return {"proposed_crews": crews, "branches": branches_out, "changes": changes,
+            "totals": totals, "surplus_detail": surplus_detail}
 
 
 def _build_recommendation(
@@ -749,6 +755,68 @@ def _apply_extra_additions(
         plan["totals"]["new_crews"] += total_new
         plan["totals"]["fleet_after"] += total_new
         plan["totals"]["net_capital_usd"] = int(plan["totals"]["new_crews"] * float(capex_usd))
+    return plan
+
+
+def _redeploy_surplus(
+    plan: dict[str, Any],
+    surplus_detail: dict[str, dict[str, int]],
+    branch_name: dict[str, str],
+    capex_usd: float,
+) -> dict[str, Any]:
+    """Fund additions with disbanded surplus-crew assets ($0) before counting them as new
+    capital; disband any remaining surplus (pure downsize, per Jon's call). Mutates plan in
+    place: shrinks changes.additions to the remaining new-buys, fills changes.redeployments +
+    changes.disbanded, clears changes.surplus_idle, decrements disbanded sources' crews_after,
+    and recomputes totals. Assets are size-agnostic (the truck/equipment moves; the destination
+    staffs it at the addition's size), so matching is 1:1 by count."""
+    assets: list[tuple[str, int]] = []  # (source_branch_id, source_crew_size)
+    for bid, det in surplus_detail.items():
+        assets += [(bid, 2)] * det.get("two", 0) + [(bid, 3)] * det.get("three", 0)
+    add_units: list[tuple[str, int]] = []  # (dest_branch_name, addition_size)
+    for a in plan["changes"]["additions"]:
+        add_units += [(a["branch_name"], a["size"])] * a["count"]
+
+    total_additions = len(add_units)
+    n = min(len(assets), total_additions)
+
+    def disband(src_bid: str, size: int) -> None:
+        b = plan["branches"].setdefault(src_bid, {"crews_after": {"two": 0, "three": 0}})
+        ca = b.setdefault("crews_after", {"two": 0, "three": 0})
+        sk = "three" if size == 3 else "two"
+        ca[sk] = max(0, ca.get(sk, 0) - 1)
+
+    # 1:1 redeploys: a surplus asset replaces a new-buy at $0.
+    redeploys: dict[tuple[str, str, int], int] = {}
+    for i in range(n):
+        src_bid, src_size = assets[i]
+        dest_name, dest_size = add_units[i]
+        disband(src_bid, src_size)
+        redeploys[(branch_name.get(src_bid, src_bid), dest_name, dest_size)] = \
+            redeploys.get((branch_name.get(src_bid, src_bid), dest_name, dest_size), 0) + 1
+
+    # leftover surplus assets (no addition to fund) -> pure downsize.
+    downsized: dict[str, int] = {}
+    for src_bid, src_size in assets[n:]:
+        disband(src_bid, src_size)
+        downsized[src_bid] = downsized.get(src_bid, 0) + 1
+
+    # remaining addition units (no asset) stay as new-buys.
+    remaining: dict[tuple[str, int], int] = {}
+    for name, size in add_units[n:]:
+        remaining[(name, size)] = remaining.get((name, size), 0) + 1
+
+    ch = plan["changes"]
+    ch["additions"] = [{"branch_name": nm, "size": sz, "count": ct} for (nm, sz), ct in remaining.items()]
+    ch["redeployments"] = [{"from_branch_name": f, "to_branch_name": to, "size": sz, "count": ct}
+                           for (f, to, sz), ct in redeploys.items()]
+    ch["disbanded"] = [{"branch_name": branch_name.get(b, b), "count": ct} for b, ct in downsized.items()]
+    ch["surplus_idle"] = []  # superseded by redeployments + disbanded
+
+    new_crews = total_additions - n
+    plan["totals"]["new_crews"] = new_crews
+    plan["totals"]["net_capital_usd"] = int(new_crews * float(capex_usd))
+    plan["totals"]["fleet_after"] = plan["totals"]["fleet_before"] + total_additions - len(assets)
     return plan
 
 
@@ -1201,6 +1269,10 @@ def run_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
         else:
             result, vcount = baseline, 0
         iterations = (1 if current_crews else 0) + vcount
+
+        # 3b) fund additions with disbanded surplus-crew assets ($0) before counting new capital;
+        #     disband any remaining surplus (downsize). Runs after the loop so it sees ALL additions.
+        _redeploy_surplus(plan, plan.get("surplus_detail", {}), branch_name, capex_usd)
 
         # 4) persist what-if run, link it
         run_id = None

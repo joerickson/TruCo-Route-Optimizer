@@ -28,11 +28,16 @@ export function RecommendTable({
   const t = result.totals;
   const c = result.changes;
 
+  const redeployments = c.redeployments ?? [];
+  const disbanded = c.disbanded ?? [];
   const hasRelocations = c.relocations.length > 0;
   const hasUpsizes = c.upsizes.length > 0;
   const hasAdditions = c.additions.length > 0;
+  const hasRedeployments = redeployments.length > 0;
+  const hasDisbanded = disbanded.length > 0;
   const hasSurplus = c.surplus_idle.length > 0;
-  const noChanges = !hasRelocations && !hasUpsizes && !hasAdditions && !hasSurplus;
+  const noChanges = !hasRelocations && !hasUpsizes && !hasAdditions
+    && !hasRedeployments && !hasDisbanded && !hasSurplus;
 
   return (
     <div className="space-y-4">
@@ -119,6 +124,33 @@ export function RecommendTable({
                     <span className="ml-2 text-muted-foreground">
                       ${(a.count * t.capex_usd).toLocaleString()} capital
                     </span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {hasRedeployments && (
+            <div>
+              <p className="font-medium mb-1">Disband &amp; redeploy</p>
+              <ul className="space-y-1">
+                {redeployments.map((r, i) => (
+                  <li key={i}>
+                    Disband {r.count} crew(s) at {r.from_branch_name} &rarr; redeploy asset to {r.to_branch_name} ({r.size}-person)
+                    <span className="ml-2 text-muted-foreground">$0 capital</span>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          )}
+
+          {hasDisbanded && (
+            <div>
+              <p className="font-medium mb-1">Disband (downsize)</p>
+              <ul className="space-y-1">
+                {disbanded.map((d, i) => (
+                  <li key={i} className="text-muted-foreground">
+                    Disband {d.count} surplus crew(s) at {d.branch_name} &mdash; frees the asset
                   </li>
                 ))}
               </ul>

@@ -160,6 +160,10 @@ export interface RecommendationChanges {
   upsizes: { branch_name: string; count: number }[];
   additions: { branch_name: string; size: 2 | 3; count: number }[];
   surplus_idle: { branch_name: string; count: number }[];
+  // Disband a surplus crew and move its asset ($0) to fund an addition elsewhere (any cluster).
+  redeployments?: { from_branch_name: string; to_branch_name: string; size: 2 | 3; count: number }[];
+  // Surplus crews disbanded with no redeploy target (pure downsize). Optional for back-compat.
+  disbanded?: { branch_name: string; count: number }[];
 }
 
 export interface RecommendationResult {
