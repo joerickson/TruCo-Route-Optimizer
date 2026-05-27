@@ -1,164 +1,243 @@
-# Recommender Logic Fix + What-If Schedule Preview — Design Spec
+# Capital-Aware Crew Recommender + What-If Schedule Preview — Design Spec
 
 **Date:** 2026-05-27
-**Status:** Proposed (design)
-**Scope:** Two related changes to the crew-mix recommender:
-1. **Demand-anchor the crew count** so it stops over-provisioning small branches
-   (the bug: St George 78 h/wk → 5 crews @ 21%, Dallas 77 h/wk → 5 @ 14%).
-2. **Persist the recommender's final validated schedule** as a viewable, read-only
-   "what-if" optimization run, linked from `/recommend`, so the user can see the
-   day-by-day schedule the recommended mix produces — without touching the live fleet.
+**Status:** Approved (design)
+**Supersedes:** the from-scratch bin-pack recommender and its artifact-driven add loop.
 
-Both ship together (one solver redeploy + one migration).
+## 0. Summary
 
-## 1. Problem
+Reframe the crew-mix recommender from "design an ideal fleet from scratch and
+brute-force-add crews until nothing is unassigned" to a **capital-aware fleet-change
+planner**: given the **current** crews + branches + demand, recommend the
+**cheapest set of changes** to bring every branch within a sustainable workload
+ceiling, where each genuinely new crew carries ~**$110k** of equipment capex (truck,
+mower, trailer) and that figure is **editable in the UI**. Then **persist the
+resulting schedule** as a read-only "what-if" optimization run linked from
+`/recommend`, so the user can see the day-by-day schedule the recommended fleet
+produces — without touching the live Crews table.
 
-`run_recommendation` seeds an analytical fleet (bin-pack each branch's demand into
-2-/3-person crews), then runs a bounded validate-and-adjust loop calling
-`run_optimization` and applying `_recommend_adjustments`. Two flaws make it
-over-provision small branches:
+This fixes the observed bug (St George 78 h/wk → 5 crews @ 21%; Dallas 77 h/wk → 5 @
+14%): the old loop added a crew for any per-day routing artifact and only trimmed
+when global unassigned was empty.
 
-- **Adds are artifact-driven, not capacity-driven.** `_recommend_adjustments`
-  (`solver/api/index.py:413-415`) adds a crew to any branch with *any* unassigned
-  property after a validate run. At a small branch, unassigned is almost always a
-  per-day VRP/day-packing artifact (a property landing on a day the lone crew can't
-  reach, same-day-of-week soft constraint), **not** a capacity gap — 78 h of demand
-  vs ~85 h of one crew's capacity is plenty. The loop adds a crew anyway, every
-  round, up to `_REC_MAX_RUNS=5` → 1 seed + 4 adds = 5 crews at ~20% util. More idle
-  crews never resolve a routing artifact.
-- **Trim is globally gated.** The trim path only fires `if not unassigned_ids:`
-  (`index.py:418`) — i.e. only when *zero* properties are unassigned *anywhere*. One
-  genuinely hard property elsewhere (e.g. Canyon Park) keeps the global list
-  non-empty forever, so over-provisioned small branches are never trimmed.
+## 1. Cost model & levers
 
-## 2. Fix #1 — demand-anchored add/trim (`_recommend_adjustments`)
+A crew's $110k is **equipment** (one rig per crew). Headcount is labor, not capex.
+So levers, cheapest first:
 
-Constants (unchanged): `CAP2≈85`, `CAP3≈127.5` person-h/wk, sustainable `50`,
-over-provisioned floor `_REC_OVER_PROVISIONED_CLOCK=40`.
+1. **Relocate** an idle crew from an over-provisioned branch to a short branch — **$0**.
+2. **Upsize** a 2-person crew at a short branch to 3-person — **labor only**
+   (~+42.5 clock-h/wk of capacity), **no capex**.
+3. **Buy** a new crew — **capex = `capex_usd`** (default 110000); +85 person-h/wk
+   (2-person) or +127.5 (3-person, when a property exceeds a 2-person crew's weekly
+   capacity).
 
-Per branch B, define from the last validate result:
-- `capacity_B = Σ (CAP3 if crew is 3-person else CAP2)` over B's crews.
-- `demand_B = Σ est_labor_hours` of B's attributed properties.
-- `maxclock_B = max(clock_hours)` over B's crews (0 if none); `busy` ⇔ `maxclock_B ≥
-  _REC_SUSTAINABLE_CLOCK_PER_WEEK (50)`; `idle` ⇔ every crew at B `< 40`.
+The planner exhausts cheaper levers before resorting to dearer ones.
 
-**Add** a crew to B (only when B has unassigned attributed work) **iff** B is
-genuinely capacity-short:
-- `capacity_B < demand_B` (raw shortage), **or**
-- `busy` (B's crews are actually near the sustainable ceiling, so capacity is the
-  binding constraint).
+## 2. Constants
 
-If B has unassigned work but is **not** capacity-short and **not** busy (its crews
-sit under 40 h while work is unassigned) → **do not add**; it's a routing artifact,
-left as residual. Size of an added crew: 3-person iff any *uncovered* property at B
-exceeds `CAP2`, else 2-person (unchanged rule).
+`solver/api/index.py` (mirror the workload bands; the lever order + caps are also
+mirrored conceptually in `src/lib/unassigned-fix.ts` — keep documented, see §7):
 
-**Trim** one crew from B (independent of global unassigned) **iff**: B has `>1` crew,
-B is `idle` (all crews `< 40`), **and** dropping the least-utilized crew keeps
-`capacity_B − dropped_cap ≥ demand_B`. Remove the least-utilized crew. (The
-40↔50 gap gives hysteresis so add/trim can't oscillate.)
+```
+_REC_SUSTAINABLE_CLOCK_PER_WEEK = 50.0   # band reference (display)
+_REC_TIGHT_CLOCK_PER_WEEK       = 55.0   # add-trigger ceiling (deferred-capex band)
+_REC_USABLE_FRACTION            = 0.85
+_REC_OVER_PROVISIONED_CLOCK     = 40.0   # a crew under this is idle / a relocation source
+_REC_CAP2  = 0.85*50*2 = 85.0            # sustainable weekly person-hours, 2-person
+_REC_CAP3  = 0.85*50*3 = 127.5           # sustainable, 3-person
+_REC_CAP2_TIGHT = 0.85*55*2 = 93.5       # capacity used for the add-trigger, 2-person
+_REC_CAP3_TIGHT = 0.85*55*3 = 140.25     # add-trigger, 3-person
+_REC_DEFAULT_CREW_CAPEX_USD = 110_000    # default; overridden by payload capex_usd
+```
 
-Loop still terminates on "no adds and no removes," `_REC_MAX_RUNS`, or
-`_REC_TIME_CAP_SECONDS`. Result on the user's data: St George and Dallas converge to
-**1 crew each**; SLC HQ / Lindon are unchanged.
+## 3. Algorithm (`run_recommendation`, solver, backgrounded)
 
-## 3. Fix #2 — what-if schedule preview
+Inputs (payload): `branches`, `properties`, **`crews`** (current active crews:
+id, name, crew_size, home_branch_id), **`capex_usd`** (number),
+**`target_week`** (Monday ISO date), `recommendation_id`.
 
-The final validate already produces a complete optimization result (routes,
-per-crew utilization, totals, capacity band, unassigned) for the recommended fleet.
-We persist it as a read-only run and link to it.
+1. **Attribute demand to branches** (`_attribute_to_branches`, unchanged):
+   `preferred_branch_id` if active else nearest active geocoded branch. `demand_B`
+   = Σ `est_labor_hours` of B's attributed properties.
+2. **Baseline validate:** run `run_optimization` on the **current** fleet to get the
+   actual per-crew clock-hours (drive-aware) → `util_before`. A crew is **idle** if
+   its clock `< 40`. Short/deficit is decided purely by **capacity vs demand** (next
+   step), *not* by baseline unassigned — unassigned at a within-capacity branch is a
+   routing artifact and must not trigger a buy. The baseline run also supplies
+   `util_before` for the before→after display and identifies idle relocation sources.
+3. **Plan deltas — cheapest lever first** (deterministic ordering):
+   - **Sources** = idle crews at non-short branches (sorted capacity desc, then name).
+   - For each short branch B (largest deficit first; `deficit_B = demand_B − tight_capacity_B`):
+     a. **Relocate** sources into B (largest capacity first), subtracting tight
+        capacity, until `deficit_B ≤ 0` or sources exhausted.
+     b. Else **upsize** B's 2-person crews to 3-person, each adding
+        `CAP3_TIGHT − CAP2_TIGHT` (~+46.75), until `deficit_B ≤ 0` or none left.
+     c. Else **buy** crews: 3-person if any uncovered attributed property `> CAP2`
+        (a 2-person crew can't do it in a sustainable week), else 2-person; subtract
+        tight capacity until `deficit_B ≤ 0`.
+   - **Rebalance pass (still free):** after every `>55` deficit is closed, keep
+     relocating *remaining* idle crews to the branch whose crews are most loaded and
+     still **above the sustainable band** (avg clock `> 50`), most-loaded first,
+     recomputing after each move; stop when no branch is above 50 or idle crews run
+     out. (Free capacity flows toward the tightest branches for margin — never to a
+     branch already comfortably `≤ 50`, so no pointless shuffling.)
+   - Only crews with **no beneficial target** (every branch already `≤ 50`) →
+     `surplus_idle` (branch, count): surfaced as idle rigs that could be redeployed,
+     **never auto-removed/disbanded** (capex is sunk). Relocation is always preferred
+     over flagging.
+4. **Validate the proposed fleet** (current ± relocations/upsizes/adds) with
+   `run_optimization` → `util_after` + routes. **Bounded refine:** if a branch's crews
+   still sustain `> 55` clock-h (genuine shortfall, not a one-property artifact),
+   apply one more cheapest lever at that branch and re-validate; cap at
+   `_REC_MAX_RUNS` rounds / `_REC_TIME_CAP_SECONDS`. Refine **does not** chase residual
+   unassigned that leaves all of a branch's crews under 40 (that's a routing artifact;
+   leave as residual).
+5. **Persist the what-if run** (see §4) and **build the result payload** (see §5).
 
-### 3.1 Synthetic crews readable on the run page
-`_make_rec_crew` names become `"{Branch name} · {size}p #{k}"` (e.g. "Lindon Branch
-· 3p #1") so the schedule's per-crew rows read sensibly. (Branch name is available
-in `run_recommendation`.)
+The whole thing runs in the existing daemon-thread background job (acks immediately).
 
-### 3.2 Persist the run (solver)
-After the loop settles on the final fleet, `run_recommendation`:
-1. Runs one final `validate(final_fleet)` (so the persisted run matches the
-   recommended mix exactly).
-2. **INSERTs an `optimization_runs` row** via REST (new `_supabase_insert` helper,
-   mirror of `_supabase_patch`) with: `name = "What-if: {rec name}"`,
-   `run_kind = 'what_if'`, `target_week_start_date` (from payload; see 3.4),
-   `status = 'completed'`, `active_branch_ids` = real branch ids,
-   `active_crew_ids = null` (synthetic), `active_property_ids` = property ids, and
-   all result fields from the validate (`routes_jsonb`, `crew_utilization`, totals,
-   `capacity_recommendation`, `recommendation_text`, `unassigned_property_ids`,
-   `solver_runtime_seconds`), `started_at`/`completed_at`/`created_at = now`.
-   Capture the returned `id`.
-3. PATCHes `crew_recommendations` with `optimization_run_id = <that id>` (in addition
-   to the existing completed-status patch).
+## 4. What-if schedule preview
 
-If the run insert fails, the recommendation still completes (the link is best-effort;
-`optimization_run_id` stays null and the page just omits the link).
+The final proposed-fleet validate already produces a complete optimization result.
+Persist it as a read-only run and link to it.
 
-### 3.3 Migration
+- **Synthetic crew names** read sensibly: `_make_rec_crew` → `"{Branch} · {size}p #{k}"`;
+  relocated/upsized crews keep their real names (annotated in the changes list, not
+  the run).
+- **Insert an `optimization_runs` row** via a new `_supabase_insert` helper (mirror of
+  `_supabase_patch`): `name = "What-if: {rec name}"`, `run_kind = 'what_if'`,
+  `target_week_start_date = target_week`, `status='completed'`,
+  `active_branch_ids` = real branch ids, `active_crew_ids = null`,
+  `active_property_ids` = property ids, plus all result fields (`routes_jsonb`,
+  `crew_utilization`, totals, `capacity_recommendation`, `recommendation_text`,
+  `unassigned_property_ids`, `solver_runtime_seconds`), `started_at/completed_at/
+  created_at = now`. Capture the returned `id`.
+- **PATCH** `crew_recommendations` with `optimization_run_id = <id>` alongside the
+  completed-status patch. If the run insert fails, the recommendation still completes;
+  `optimization_run_id` stays null and the page omits the link (best-effort).
+
+## 5. Result payload (`result_jsonb`)
+
+```jsonc
+{
+  "branches": [{
+    "branch_id", "branch_name",
+    "demand_hours",
+    "crews_before": { "two": int, "three": int },
+    "crews_after":  { "two": int, "three": int },
+    "util_before_pct", "util_after_pct",
+    "relocated_in":  [crew_name, ...],   // crews moved into this branch
+    "upsized":       int,                // 2->3 upsizes here
+    "added":         { "two": int, "three": int },
+    "drivers_three_person": [prop_name],  // props CAP2<labor<=CAP3
+    "split_properties":     [prop_name]   // props > CAP3
+  }],
+  "changes": {
+    "relocations": [{ "crew_name", "from_branch_name", "to_branch_name", "reason": "deficit"|"rebalance" }],
+    "upsizes":     [{ "branch_name", "count" }],
+    "additions":   [{ "branch_name", "size": 2|3, "count" }],
+    "surplus_idle": [{ "branch_name", "count" }]   // idle rigs with no beneficial target; redeployable, not disbanded
+  },
+  "totals": {
+    "fleet_before": int, "fleet_after": int,
+    "new_crews": int,
+    "capex_usd": number,                 // the input figure echoed
+    "net_capital_usd": int,              // new_crews * capex_usd
+    "demand_hours": number
+  },
+  "unattributable_property_ids": [id],
+  "residual_unassigned": { "count": int, "labor_hours": number }
+}
+```
+
+## 6. Migration
+
 ```sql
+-- link the recommendation to its what-if run
 alter table public.crew_recommendations
-  add column if not exists optimization_run_id uuid references public.optimization_runs(id) on delete set null;
+  add column if not exists optimization_run_id uuid
+    references public.optimization_runs(id) on delete set null;
 
+-- allow the new run_kind (existing inline check is auto-named *_run_kind_check)
 alter table public.optimization_runs drop constraint if exists optimization_runs_run_kind_check;
 alter table public.optimization_runs
-  add constraint optimization_runs_run_kind_check check (run_kind in ('optimized','baseline','what_if'));
+  add constraint optimization_runs_run_kind_check
+    check (run_kind in ('optimized','baseline','what_if'));
 ```
-(The `run_kind` check is recreated to allow `'what_if'`; the exact existing
-constraint name is verified against `20260526000000_run_kind.sql` during planning.)
 
-### 3.4 target_week
-The recommendation is peak-week-agnostic, but `optimization_runs.target_week_start_date`
-is required. The web passes `target_week` (the current week's Monday, computed in the
-action) in the recommend payload; the solver uses it for the persisted run.
+Paste-ready SQL included in the delivering response; run before redeploying the
+solver (per deploy-workflow).
 
-### 3.5 Web
-- `src/lib/types.ts`: add `optimization_run_id: string | null` to `CrewRecommendation`;
-  add `'what_if'` to `OptimizationRun.run_kind`.
-- `src/app/recommend/actions.ts`: include `target_week` in the recommend payload.
-- `src/app/recommend/page.tsx` / `recommend-table.tsx`: when
-  `rec.optimization_run_id` is set, render a link **"View optimized schedule for this
+## 7. Web changes
+
+- `src/lib/types.ts`: extend `RecommendationResult` to the §5 shape; add
+  `optimization_run_id: string | null` to `CrewRecommendation`; add `'what_if'` to
+  `OptimizationRun.run_kind`.
+- `src/app/recommend/recommend-form.tsx`: add a **Capex per crew ($)** number input
+  (default `110000`); name unchanged.
+- `src/app/recommend/actions.ts`: gather **active crews** (id, name, crew_size,
+  home_branch_id) in addition to branches/properties; parse `capex_usd` (default
+  110000, guard ≥ 0); compute `target_week` = current week's Monday (ISO); include
+  `crews`, `capex_usd`, `target_week` in the payload.
+- `src/app/recommend/recommend-table.tsx`: render the delta view — a **headline**
+  ("Net new capital: $110k · fleet 30 → 31"), a **changes** list (relocations $0,
+  upsizes labor-only, additions $110k each, redeploy flags), a per-branch
+  **before → after** util/crew table, residual unassigned, and — when
+  `rec.optimization_run_id` is set — a link **"View optimized schedule for this
   fleet →"** to `/runs/<id>`.
-- `src/app/runs/[runId]/page.tsx`: for `run_kind === 'what_if'`, **skip the
-  unassigned-fix card** (`loadFixPlan`) — synthetic crew ids don't match the live
-  Crews table, so a fix plan would be bogus. Show a small banner: "What-if preview of
-  a recommended fleet — these crews aren't in your Crews table." The crew-meta chip
-  ("SLC · 3p") already degrades to name-only when a crew id isn't found; verify it
-  doesn't throw. Day tabs, per-crew util, map, CSV export work unchanged off
-  `routes_jsonb` / `crew_utilization`.
+- `src/app/runs/[runId]/page.tsx`: for `run_kind === 'what_if'`, **skip** the
+  unassigned-fix card (`loadFixPlan`) — synthetic crew ids don't match the Crews
+  table — and show a small banner: "What-if preview of a recommended fleet — these
+  crews aren't in your Crews table." Verify the crew-meta chip degrades to name-only
+  (doesn't throw) when a crew id isn't found. Day tabs / per-crew util / map / CSV
+  export work unchanged off `routes_jsonb` + `crew_utilization`.
+- **Mirror note:** add a comment in both `solver/api/index.py` (recommender) and
+  `src/lib/unassigned-fix.ts` pointing at each other: same lever order
+  (relocate → upsize → buy) and caps, mirrored across the Python/TS boundary on
+  purpose (recommender needs the solver's background-job loop; unassigned-fix is a
+  fast single-plan in the web). Not literally shared code.
 
-## 4. Out of scope
-- Applying the recommended fleet to the live Crews table (the rejected option; the
-  unassigned-fix Apply already covers an apply-and-optimize flow if wanted later).
-- Per-property reassignment, geography/routing improvements to reduce residual
-  unassigned (the recommender reports residual honestly; routing is the optimizer's
-  job).
-- Changing the analytical seed / bin-pack (it's correct; only the loop's add/trim
-  rules change).
+## 8. Testing
 
-## 5. Testing
-- **Solver pure helpers** (no OR-Tools needed): a `check_recommend_adjustments.py`
-  standalone script exercising `_recommend_adjustments` with crafted
-  fleet/util/unassigned inputs:
-  - under-utilized branch with unassigned work + capacity ≥ demand → **no add**.
-  - capacity-short branch (capacity < demand) with unassigned → **add** (size 3 if a
-    big uncovered property, else 2).
-  - busy branch (crew ≥ 50) with unassigned + capacity ≥ demand → **add**.
-  - over-provisioned branch (`>1` crew, all < 40, capacity−least ≥ demand) → **trim**
-    least-utilized, regardless of global unassigned.
-  - no oscillation: a branch at 1 crew, idle, capacity ≥ demand → neither add nor trim.
-- **Solver name change**: `check` script asserts `_make_rec_crew` name format.
-- **VRP end-to-end** (recommend produces a sane mix + a linked what-if run that opens
-  on the run page) is a **post-deploy manual gate** (OR-Tools runs only on the
-  deployed solver).
-- **Web**: typecheck/lint/build; existing vitest stays green; run-page `what_if`
-  branch verified manually post-deploy.
+- **Solver pure helpers** via a standalone `check_recommend_plan.py` (OR-Tools not
+  needed — the planner is pure; `solve_day` import is guarded):
+  - **no over-provisioning:** branch with `demand ≤ tight_capacity` and idle crews +
+    unassigned routing artifact → **no add, no upsize** (St George/Dallas case).
+  - **relocate-first:** a short branch with an idle crew available elsewhere → crew
+    **relocated** ($0), no buy.
+  - **upsize-before-buy:** short branch, no sources, has a 2-person crew → **upsize**
+    (labor-only) chosen before a buy; deficit closed.
+  - **buy-last:** short branch, no sources, no upsizable crews → **buy** (3-person if
+    a `>CAP2` property present, else 2-person); `new_crews`/`net_capital_usd` correct.
+  - **rebalance relocate:** no branch over the 55 deficit, but an idle crew exists at
+    a ≤40 branch while another branch's crews average >50 → idle crew **relocated**
+    to the loaded branch (`reason: "rebalance"`), not flagged.
+  - **surplus only when nothing benefits:** idle crew(s) and every branch already
+    ≤50 → `surplus_idle` set; no relocation, not removed.
+  - **capex echo:** `capex_usd` from payload flows to `net_capital_usd = new_crews ×
+    capex_usd`; determinism (stable ordering) across runs.
+  - **name format:** `_make_rec_crew` → `"{Branch} · {size}p #{k}"`.
+- **VRP end-to-end** (sane mix on real data + a linked what-if run that opens on the
+  run page) — **post-deploy manual gate** (OR-Tools runs only on the deployed solver).
+- **Web:** typecheck/lint/build; existing vitest stays green; `what_if` run-page
+  branch + recommend form/table verified manually post-deploy.
 
-## 6. Risks / notes
-- **Residual unassigned may rise** for small branches (we no longer brute-force-add
-  crews to clear routing artifacts). That's intended and honest; the what-if schedule
-  shows exactly which properties are unrouted so the user sees it's a routing/geography
-  issue, not a fleet-size one.
-- **Synthetic crews on the run page**: gated by `run_kind === 'what_if'`; the fix card
-  is suppressed and the page must not assume every crew id exists in the Crews table.
-- **Migration + solver redeploy required** before the web change is useful; deploy
-  order: run migration → redeploy solver → push web (per deploy-workflow memory).
-- **Constants** stay shared with `src/lib/unassigned-fix.ts` (CAP2/CAP3/floor); keep
-  consistent if tuned.
+## 9. Out of scope
+- Applying the recommended fleet to the live Crews table (the unassigned-fix Apply
+  flow already covers apply-and-optimize if wanted later).
+- Auto-removing/selling over-provisioned crews (capex sunk; only flagged).
+- Routing/geography improvements to reduce residual unassigned (the optimizer's job;
+  residual is reported honestly).
+- Multi-week / seasonal capex amortization, financing, ROI vs revenue — the tool
+  reports capital required, not payback.
+
+## 10. Risks / notes
+- **Residual unassigned may rise** at small branches (we stop padding idle crews to
+  clear routing artifacts). Intended and honest; the what-if schedule shows exactly
+  which properties are unrouted.
+- **Baseline + proposed validates** mean ≥2 solver runs per recommendation (plus
+  bounded refine) — already within the backgrounded job's time budget
+  (`_REC_TIME_CAP_SECONDS`), which acks immediately so no proxy timeout.
+- **Synthetic crews on the run page** gated by `run_kind === 'what_if'`.
+- **Deploy order:** run migration → redeploy solver → push web.

@@ -116,7 +116,7 @@ export interface OptimizationRun {
   name: string;
   // 'optimized' = a solver optimization; 'baseline' = a scored current (unoptimized)
   // schedule, produced by the solver's evaluate mode. Both share this table.
-  run_kind: 'optimized' | 'baseline';
+  run_kind: 'optimized' | 'baseline' | 'what_if';
   target_week_start_date: string;
   active_branch_ids: string[] | null;
   active_crew_ids: string[] | null;
@@ -143,22 +143,34 @@ export interface OptimizationRun {
 export interface BranchRecommendation {
   branch_id: string;
   branch_name: string;
-  two_person: number;
-  three_person: number;
-  total_people: number;
   demand_hours: number;
-  avg_util_pct: number;
+  crews_before: { two: number; three: number };
+  crews_after: { two: number; three: number };
+  util_before_pct: number;
+  util_after_pct: number;
+  relocated_in: string[];
+  upsized: number;
+  added: { two: number; three: number };
   drivers_three_person: string[];
   split_properties: string[];
 }
 
+export interface RecommendationChanges {
+  relocations: { crew_name: string; from_branch_name: string; to_branch_name: string; reason: 'deficit' | 'rebalance' }[];
+  upsizes: { branch_name: string; count: number }[];
+  additions: { branch_name: string; size: 2 | 3; count: number }[];
+  surplus_idle: { branch_name: string; count: number }[];
+}
+
 export interface RecommendationResult {
   branches: BranchRecommendation[];
+  changes: RecommendationChanges;
   totals: {
-    two_person: number;
-    three_person: number;
-    total_crews: number;
-    total_people: number;
+    fleet_before: number;
+    fleet_after: number;
+    new_crews: number;
+    capex_usd: number;
+    net_capital_usd: number;
     demand_hours: number;
   };
   unattributable_property_ids: string[];
@@ -170,6 +182,7 @@ export interface CrewRecommendation {
   name: string | null;
   status: RunStatus;
   result_jsonb: RecommendationResult | null;
+  optimization_run_id: string | null;
   iterations: number | null;
   solver_runtime_seconds: number | null;
   failure_reason: string | null;

@@ -1,12 +1,16 @@
 import { Card, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
 import { getServerClient } from '@/lib/supabase';
-import type { CrewRecommendation } from '@/lib/types';
+import type { CrewRecommendation, RecommendationResult } from '@/lib/types';
 import { RecommendRefresher } from './recommend-refresher';
 import { RecommendForm } from './recommend-form';
 import { RecommendTable } from './recommend-table';
 
 export const dynamic = 'force-dynamic';
+
+function isDeltaShape(r: RecommendationResult | null | undefined): boolean {
+  return !!r && !!r.changes && !!r.totals && typeof r.totals.net_capital_usd === 'number';
+}
 
 export default async function RecommendPage() {
   const supabase = getServerClient();
@@ -54,13 +58,24 @@ export default async function RecommendPage() {
       )}
 
       {rec && rec.status === 'completed' && rec.result_jsonb && (
-        <>
-          <RecommendTable result={rec.result_jsonb} />
-          <p className="text-xs text-muted-foreground">
-            {rec.iterations ?? 0} solver round(s) · {rec.solver_runtime_seconds ?? 0}s. Analytical seed validated by the
-            optimizer; capacity assumes ~50 sustainable clock-hrs/crew/wk. Create these crews and run the optimizer to confirm.
-          </p>
-        </>
+        isDeltaShape(rec.result_jsonb) ? (
+          <>
+            <RecommendTable result={rec.result_jsonb} runId={rec.optimization_run_id} />
+            <p className="text-xs text-muted-foreground">
+              {rec.iterations ?? 0} solver round(s) · {rec.solver_runtime_seconds ?? 0}s. Analytical seed validated by the
+              optimizer; capacity assumes ~50 sustainable clock-hrs/crew/wk. Create these crews and run the optimizer to confirm.
+            </p>
+          </>
+        ) : (
+          <Card>
+            <CardHeader>
+              <CardTitle>Recommendation from an earlier version</CardTitle>
+              <CardDescription>
+                This recommendation predates the capital-aware fleet planner. Run a new one above to see the relocate / upsize / buy plan and the what-if schedule.
+              </CardDescription>
+            </CardHeader>
+          </Card>
+        )
       )}
     </div>
   );
