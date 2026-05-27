@@ -2,7 +2,8 @@
 python3 solver/api/check_recommend_plan.py   (no OR-Tools needed)."""
 import os, sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from index import _plan_fleet_changes, _make_rec_crew, _REC_CAP2, _branch_clusters, _apply_extra_additions, _cover_residual
+from index import (_plan_fleet_changes, _make_rec_crew, _REC_CAP2, _branch_clusters,
+                   _apply_extra_additions, _cover_residual, _redeploy_surplus)
 
 BN = {"slc": "SLC HQ", "stg": "St George", "lin": "Lindon"}
 
@@ -193,5 +194,63 @@ result5, extra5, _, _ = _cover_residual([crew("x", "good", 2)], _bb, _pl, BN, _v
 assert extra5.get("good", {}).get("two", 0) == 2, extra5    # good keeps the 2 crews that helped it
 assert "bad" not in extra5, extra5                          # bad's probe didn't help -> rolled back, 0 added
 assert result5["unassigned_property_ids"] == ["b1"], result5  # un-routable work surfaced, not chased
+
+# --- _redeploy_surplus: surplus assets fund additions ($0) before counting new capital ---
+def _mk_plan(additions, fleet_before, fleet_after, capex=110000):
+    return {
+        "branches": {
+            "stg": {"crews_before": {"two": 1, "three": 2}, "crews_after": {"two": 1, "three": 2},
+                    "relocated_in": [], "upsized": 0, "added": {"two": 0, "three": 0}},
+            "lin": {"crews_before": {"two": 3, "three": 1}, "crews_after": {"two": 3 + sum(a["count"] for a in additions if a["size"] == 2), "three": 1},
+                    "relocated_in": [], "upsized": 0, "added": {}},
+        },
+        "changes": {"relocations": [], "upsizes": [], "additions": [dict(a) for a in additions],
+                    "surplus_idle": [{"branch_name": "St George", "count": 2}],
+                    "redeployments": [], "disbanded": []},
+        "totals": {"fleet_before": fleet_before, "fleet_after": fleet_after,
+                   "new_crews": sum(a["count"] for a in additions), "capex_usd": float(capex),
+                   "net_capital_usd": int(sum(a["count"] for a in additions) * capex)},
+    }
+
+BN2 = {"stg": "St George", "lin": "Lindon"}
+
+# 2 St George surplus (1×2p,1×3p) fund 2 of Lindon's 5 buys -> 3 new, 2 redeployed, net capital drops
+p = _mk_plan([{"branch_name": "Lindon", "size": 2, "count": 5}], fleet_before=32, fleet_after=37)
+_redeploy_surplus(p, {"stg": {"two": 1, "three": 1}}, BN2, 110000)
+assert p["totals"]["new_crews"] == 3, p["totals"]                      # 5 buys - 2 redeployed
+assert p["totals"]["net_capital_usd"] == 330000, p["totals"]
+assert p["totals"]["fleet_after"] == 35, p["totals"]                   # 32 + 5 additions - 2 disbanded
+assert sum(a["count"] for a in p["changes"]["additions"]) == 3, p["changes"]
+assert sum(r["count"] for r in p["changes"]["redeployments"]) == 2, p["changes"]
+assert all(r["to_branch_name"] == "Lindon" and r["from_branch_name"] == "St George" for r in p["changes"]["redeployments"])
+assert p["changes"]["disbanded"] == [], p["changes"]                   # all surplus redeployed, none downsized
+assert p["changes"]["surplus_idle"] == [], p["changes"]                # superseded
+assert p["branches"]["stg"]["crews_after"] == {"two": 0, "three": 1}, p["branches"]["stg"]  # disbanded 1×2p+1×3p
+
+# more surplus (3) than additions (1) -> 1 redeployed, 2 pure-downsized, 0 new
+p2 = _mk_plan([{"branch_name": "Lindon", "size": 2, "count": 1}], fleet_before=32, fleet_after=33)
+_redeploy_surplus(p2, {"stg": {"two": 1, "three": 2}}, BN2, 110000)
+assert p2["totals"]["new_crews"] == 0, p2["totals"]
+assert p2["totals"]["net_capital_usd"] == 0, p2["totals"]
+assert p2["totals"]["fleet_after"] == 30, p2["totals"]                 # 32 + 1 - 3 disbanded
+assert sum(r["count"] for r in p2["changes"]["redeployments"]) == 1, p2["changes"]
+assert sum(d["count"] for d in p2["changes"]["disbanded"]) == 2, p2["changes"]
+assert p2["changes"]["additions"] == [], p2["changes"]
+
+# no surplus -> no-op (additions and capital unchanged)
+p3 = _mk_plan([{"branch_name": "Lindon", "size": 2, "count": 4}], fleet_before=32, fleet_after=36)
+_redeploy_surplus(p3, {}, BN2, 110000)
+assert p3["totals"]["new_crews"] == 4 and p3["totals"]["net_capital_usd"] == 440000, p3["totals"]
+assert sum(a["count"] for a in p3["changes"]["additions"]) == 4, p3["changes"]
+assert p3["changes"]["redeployments"] == [] and p3["changes"]["disbanded"] == [], p3["changes"]
+
+# surplus but NO additions -> all surplus pure-downsized, 0 new, fleet shrinks
+p4 = _mk_plan([], fleet_before=32, fleet_after=32)
+_redeploy_surplus(p4, {"stg": {"two": 1, "three": 1}}, BN2, 110000)
+assert p4["totals"]["new_crews"] == 0 and p4["totals"]["net_capital_usd"] == 0, p4["totals"]
+assert p4["totals"]["fleet_after"] == 30, p4["totals"]            # 32 + 0 additions - 2 disbanded
+assert p4["changes"]["redeployments"] == [], p4["changes"]
+assert sum(d["count"] for d in p4["changes"]["disbanded"]) == 2, p4["changes"]
+assert p4["branches"]["stg"]["crews_after"] == {"two": 0, "three": 1}, p4["branches"]["stg"]
 
 print("check_recommend_plan: PASS")
