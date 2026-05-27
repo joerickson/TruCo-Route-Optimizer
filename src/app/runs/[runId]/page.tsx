@@ -50,7 +50,10 @@ export default async function RunPage({
 
   const unassignedSummary =
     run.status === 'completed' ? await loadUnassignedSummary(supabase, run) : null;
-  const fixPlan = run.status === 'completed' ? await loadFixPlan(supabase, run) : null;
+  const fixPlan =
+    run.status === 'completed' && run.run_kind !== 'what_if'
+      ? await loadFixPlan(supabase, run)
+      : null;
   const underUtilizedCrews = (run.crew_utilization ?? []).filter((c) => c.clock_hours > 0 && c.clock_hours < 40).length;
 
   return (
@@ -62,6 +65,7 @@ export default async function RunPage({
           <div className="flex items-center gap-2">
             <h1 className="text-2xl font-bold tracking-tight">{run.name}</h1>
             {run.run_kind === 'baseline' && <Badge variant="secondary">baseline</Badge>}
+            {run.run_kind === 'what_if' && <Badge variant="secondary">what-if</Badge>}
           </div>
           <p className="text-sm text-muted-foreground">
             Target week: {run.target_week_start_date} · created {new Date(run.created_at).toLocaleString()}
@@ -86,6 +90,13 @@ export default async function RunPage({
             </CardDescription>
           </CardHeader>
         </Card>
+      )}
+
+      {run.run_kind === 'what_if' && run.status === 'completed' && (
+        <div className="rounded-md border border-sky-300 bg-sky-50 p-3 text-sm text-sky-900">
+          What-if preview of a recommended fleet — these crews aren&rsquo;t in your Crews table. Capacity here is the
+          optimizer&rsquo;s estimate; create the crews to make it real.
+        </div>
       )}
 
       {run.status === 'completed' && unassignedSummary && unassignedSummary.count > 0 && (
