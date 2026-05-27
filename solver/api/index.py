@@ -430,7 +430,7 @@ def _plan_fleet_changes(
     by_branch: dict[str, list[dict[str, Any]]],
     util_by_crew: dict[str, float],
     branch_name: dict[str, str],
-    capex_usd: float,
+    capex_usd: float = _REC_DEFAULT_CREW_CAPEX_USD,
 ) -> dict[str, Any]:
     """Capital-aware delta planner. Given the current fleet + per-branch attributed
     properties + baseline per-crew clock-hours, return the cheapest set of changes
@@ -459,12 +459,17 @@ def _plan_fleet_changes(
     def has_big(bid): return any(float(p["est_labor_hours"]) > _REC_CAP2 for p in by_branch.get(bid, []))
     def has_three(bid): return any(c["crew_size"] == 3 for c in crews_at.get(bid, []))
     def is_idle(c): return util_by_crew.get(c["id"], 0.0) < _REC_OVER_PROVISIONED_CLOCK
+    # baseline_clock is intentionally static (computed once from the baseline run before any
+    # planner mutations).  The stale value is acceptable for this planning estimate; it is
+    # load-bearing for Tier-2 termination — if we recomputed it the loop could diverge.
     def est_avg(bid):
         n = len(crews_at.get(bid, []))
         return baseline_clock.get(bid, 0.0) / n if n else 0.0
 
-    def sources():  # idle crews at non-short branches, biggest first then name
-        out = [c for c in crews if is_idle(c) and deficit(c["home_branch_id"]) <= 0]
+    moved_ids: set[str] = set()
+
+    def sources():  # idle crews at non-short branches (not yet moved), biggest first then name
+        out = [c for c in crews if is_idle(c) and deficit(c["home_branch_id"]) <= 0 and c["id"] not in moved_ids]
         out.sort(key=lambda c: (-cap_of(c), c.get("name", "")))
         return out
 
@@ -478,10 +483,12 @@ def _plan_fleet_changes(
         crews_at[frm].remove(c)
         c["home_branch_id"] = to_bid
         crews_at.setdefault(to_bid, []).append(c)
+        moved_ids.add(c["id"])
         relocations.append({
             "crew_name": c.get("name", c["id"]),
             "from_branch_name": branch_name.get(frm, frm),
             "to_branch_name": branch_name.get(to_bid, to_bid),
+            "to_branch_id": to_bid,
             "reason": reason,
         })
 
@@ -526,7 +533,7 @@ def _plan_fleet_changes(
             break
         targets = sorted(
             [b for b in branch_ids if est_avg(b) > _REC_SUSTAINABLE_CLOCK_PER_WEEK],
-            key=lambda b: -est_avg(b),
+            key=lambda b: (-est_avg(b), b),
         )
         moved = False
         for tb in targets:
@@ -555,7 +562,7 @@ def _plan_fleet_changes(
 
     branches_out: dict[str, Any] = {}
     for bid in branch_ids:
-        relocated_in = [r["crew_name"] for r in relocations if r["to_branch_name"] == branch_name.get(bid, bid)]
+        relocated_in = [r["crew_name"] for r in relocations if r["to_branch_id"] == bid]
         added = {"two": additions.get((bid, 2), 0), "three": additions.get((bid, 3), 0)}
         branches_out[bid] = {
             "crews_before": counts(before_at.get(bid, [])),
