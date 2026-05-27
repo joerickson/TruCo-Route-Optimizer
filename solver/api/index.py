@@ -423,6 +423,61 @@ def _recommend_adjustments(
     return adds, removes
 
 
+def _build_recommendation(
+    fleet: list[dict[str, Any]],
+    result: dict[str, Any],
+    by_branch: dict[str, list[dict[str, Any]]],
+    prop_labor: dict[str, float],
+    unattributable: list[str],
+    branches: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Assemble the recommendation payload from the final fleet + last validate result."""
+    branch_name = {b["id"]: b.get("name", b["id"]) for b in branches}
+    util_by_crew = {u["crew_id"]: u for u in result.get("crew_utilization", [])}
+    crews_by_branch: dict[str, list[dict[str, Any]]] = {}
+    for c in fleet:
+        crews_by_branch.setdefault(c["home_branch_id"], []).append(c)
+
+    branches_out: list[dict[str, Any]] = []
+    tot2 = tot3 = 0
+    for branch_id, props in by_branch.items():
+        crews = crews_by_branch.get(branch_id, [])
+        two = sum(1 for c in crews if c["crew_size"] == 2)
+        three = sum(1 for c in crews if c["crew_size"] == 3)
+        tot2 += two
+        tot3 += three
+        demand = sum(float(p["est_labor_hours"]) for p in props)
+        utils = [float(util_by_crew.get(c["id"], {}).get("util_pct", 0.0)) for c in crews]
+        drivers = [p["name"] for p in props if _REC_CAP2 < float(p["est_labor_hours"]) <= _REC_CAP3]
+        splits = [p["name"] for p in props if float(p["est_labor_hours"]) > _REC_CAP3]
+        branches_out.append({
+            "branch_id": branch_id,
+            "branch_name": branch_name.get(branch_id, branch_id),
+            "two_person": two,
+            "three_person": three,
+            "total_people": two * 2 + three * 3,
+            "demand_hours": round(demand, 1),
+            "avg_util_pct": round(sum(utils) / len(utils), 1) if utils else 0.0,
+            "drivers_three_person": drivers,
+            "split_properties": splits,
+        })
+
+    unassigned_ids = result.get("unassigned_property_ids", []) or []
+    residual_hours = sum(prop_labor.get(pid, 0.0) for pid in unassigned_ids)
+    return {
+        "branches": branches_out,
+        "totals": {
+            "two_person": tot2,
+            "three_person": tot3,
+            "total_crews": tot2 + tot3,
+            "total_people": tot2 * 2 + tot3 * 3,
+            "demand_hours": round(sum(prop_labor.values()), 1),
+        },
+        "unattributable_property_ids": unattributable,
+        "residual_unassigned": {"count": len(unassigned_ids), "labor_hours": round(residual_hours, 1)},
+    }
+
+
 def _classify_capacity(avg_clock_per_crew: float) -> tuple[str, str]:
     if avg_clock_per_crew < 40:
         return (
@@ -690,6 +745,70 @@ def run_optimization(payload: dict[str, Any], time_limit_seconds: int = 8) -> di
     return _aggregate_result(crews, all_routes, unassigned, properties, time.time() - started)
 
 
+def run_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
+    """recommend mode: analytical seed -> validate with run_optimization -> bounded
+    add/trim loop -> write result to crew_recommendations."""
+    started = time.time()
+    rec_id = payload.get("recommendation_id")
+    branches = payload["branches"]
+    properties = payload["properties"]
+    try:
+        by_branch, unattributable = _attribute_to_branches(properties, branches)
+        prop_branch = {p["id"]: b_id for b_id, props in by_branch.items() for p in props}
+        prop_labor = {p["id"]: float(p["est_labor_hours"]) for p in properties}
+
+        fleet = _seed_fleet(properties, branches)
+        next_idx: dict[str, int] = {}
+
+        def validate(crews: list[dict[str, Any]]) -> dict[str, Any]:
+            return run_optimization(
+                {"crews": crews, "branches": branches, "properties": properties},
+                time_limit_seconds=_REC_VALIDATE_SECONDS,
+            )
+
+        result = validate(fleet)
+        iterations = 1
+        for _round in range(_REC_MAX_RUNS - 1):
+            if (time.time() - started) > _REC_TIME_CAP_SECONDS:
+                break
+            adds, removes = _recommend_adjustments(
+                fleet, result["crew_utilization"], result["unassigned_property_ids"], prop_branch, prop_labor
+            )
+            if not adds and not removes:
+                break
+            if removes:
+                rm = set(removes)
+                fleet = [c for c in fleet if c["id"] not in rm]
+            for branch_id, size in adds:
+                k = next_idx.get(branch_id, 1000) + 1
+                next_idx[branch_id] = k
+                fleet.append(_make_rec_crew(branch_id, k, size))
+            result = validate(fleet)
+            iterations += 1
+
+        rec = _build_recommendation(fleet, result, by_branch, prop_labor, unattributable, branches)
+        if rec_id:
+            _supabase_patch("crew_recommendations", rec_id, {
+                "status": "completed",
+                "result_jsonb": rec,
+                "iterations": iterations,
+                "solver_runtime_seconds": round(time.time() - started, 1),
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            })
+        return {"status": "completed", "iterations": iterations, **rec}
+    except Exception as e:
+        if rec_id:
+            try:
+                _supabase_patch("crew_recommendations", rec_id, {
+                    "status": "failed",
+                    "failure_reason": str(e)[:500],
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                })
+            except Exception:
+                pass
+        raise
+
+
 def _supabase_patch(table: str, row_id: str, fields: dict[str, Any]) -> None:
     """PATCH a single row in the given Supabase table via REST.
 
@@ -750,12 +869,20 @@ class handler(BaseHTTPRequestHandler):
 
             run_id = payload.get("run_id")
             mode = payload.get("mode", "optimize")
-            result = run_evaluation(payload) if mode == "evaluate" else run_optimization(payload)
-            if run_id:
-                # Let _persist failures surface to the outer except so the run
-                # row gets marked 'failed'. Returning 200 with a swallowed
-                # persist_error left runs stuck on 'running' forever.
-                _persist(run_id, result)
+            if mode == "recommend":
+                # run_recommendation writes its own crew_recommendations row.
+                result = run_recommendation(payload)
+            elif mode == "evaluate":
+                result = run_evaluation(payload)
+                if run_id:
+                    _persist(run_id, result)
+            else:
+                result = run_optimization(payload)
+                if run_id:
+                    # Let _persist failures surface to the outer except so the run
+                    # row gets marked 'failed'. Returning 200 with a swallowed
+                    # persist_error left runs stuck on 'running' forever.
+                    _persist(run_id, result)
 
             self.send_response(200)
             self.send_header("content-type", "application/json")
