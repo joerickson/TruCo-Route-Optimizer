@@ -34,14 +34,14 @@ import urllib.error
 import urllib.request
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
-from typing import Any
+from typing import Any, Callable
 
 # @vercel/python doesn't add the entrypoint's directory to sys.path, so sibling
 # .py files in api/ can't be imported by name without this. Without it,
 # `from solver_logic import ...` raises ModuleNotFoundError at runtime.
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from distance_matrix import haversine_miles
+from distance_matrix import haversine_miles, ROAD_FACTOR
 
 # Diagnostic: capture import failures so the GET health check can report them
 # instead of the function silently 500ing on invocation.
@@ -91,6 +91,10 @@ _REC_TIGHT_CLOCK_PER_WEEK = 55.0   # add-trigger ceiling (deferred-capex "tight"
 _REC_CAP2_TIGHT = _REC_USABLE_FRACTION * _REC_TIGHT_CLOCK_PER_WEEK * 2  # ~93.5
 _REC_CAP3_TIGHT = _REC_USABLE_FRACTION * _REC_TIGHT_CLOCK_PER_WEEK * 3  # ~140.25
 _REC_DEFAULT_CREW_CAPEX_USD = 110_000.0
+_REC_CLUSTER_RADIUS_MILES = 60.0  # branches within this road-distance are one commute cluster
+# Crews bought by the coverage loop use this id offset so they never collide with planner-bought
+# rec crews (those start at k=1; the planner buys at most demand/_REC_CAP2 per branch, far below 900).
+_REC_LOOP_CREW_ID_OFFSET = 900
 
 
 def _day_capacities(
@@ -327,6 +331,44 @@ def _attribute_to_branches(
     return by_branch, unattributable
 
 
+def _branch_clusters(
+    branches: list[dict[str, Any]], radius_miles: float = _REC_CLUSTER_RADIUS_MILES
+) -> dict[str, str]:
+    """Group branches into commute clusters by single-linkage road distance.
+
+    Two geocoded branches whose Haversine x ROAD_FACTOR distance is <= radius_miles
+    join the same cluster (transitive). Branches without coordinates are each their own
+    singleton. Returns {branch_id: root_id} where root_id is an arbitrary but stable
+    member of the cluster — it is NOT a meaningful "main branch" label; test cluster
+    membership by equality of two branches' values, don't display the root. Used to gate
+    crew relocations: a crew may only relocate to a branch in its own cluster (you can't
+    run St George's routes out of a Lindon depot 270 mi away).
+    """
+    parent = {b["id"]: b["id"] for b in branches}
+
+    def find(x: str) -> str:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a: str, b: str) -> None:
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[rb] = ra
+
+    geo = [b for b in branches if b.get("lat") is not None and b.get("lng") is not None]
+    for i in range(len(geo)):
+        for j in range(i + 1, len(geo)):
+            d = haversine_miles(
+                float(geo[i]["lat"]), float(geo[i]["lng"]),
+                float(geo[j]["lat"]), float(geo[j]["lng"]),
+            ) * ROAD_FACTOR
+            if d <= radius_miles:
+                union(geo[i]["id"], geo[j]["id"])
+    return {bid: find(bid) for bid in parent}
+
+
 def _make_rec_crew(branch_id: str, k: int, size: int, branch_label: str | None = None) -> dict[str, Any]:
     """A synthetic Mon-Fri crew at a branch, shaped for run_optimization."""
     label = branch_label or branch_id
@@ -431,6 +473,7 @@ def _plan_fleet_changes(
     util_by_crew: dict[str, float],
     branch_name: dict[str, str],
     capex_usd: float = _REC_DEFAULT_CREW_CAPEX_USD,
+    clusters: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     """Capital-aware delta planner. Given the current fleet + per-branch attributed
     properties + baseline per-crew clock-hours, return the cheapest set of changes
@@ -466,10 +509,28 @@ def _plan_fleet_changes(
         n = len(crews_at.get(bid, []))
         return baseline_clock.get(bid, 0.0) / n if n else 0.0
 
+    def keeps_coverage(c) -> bool:
+        # Removing c must leave its home branch able to cover its own attributed demand.
+        bid = c["home_branch_id"]
+        return branch_cap(bid) - cap_of(c) >= demand.get(bid, 0.0)
+
     moved_ids: set[str] = set()
 
-    def sources():  # idle crews at non-short branches (not yet moved), biggest first then name
-        out = [c for c in crews if is_idle(c) and deficit(c["home_branch_id"]) <= 0 and c["id"] not in moved_ids]
+    cluster_of = clusters or {}
+
+    def same_cluster(bid_a: str, bid_b: str) -> bool:
+        # No cluster map (older callers / pure tests) => unrestricted (legacy behavior).
+        if not cluster_of:
+            return True
+        ca, cb = cluster_of.get(bid_a), cluster_of.get(bid_b)
+        # An unmapped branch is its own singleton: never same-cluster as anything (avoids
+        # None == None treating two unknown branches as relocatable).
+        return ca is not None and ca == cb
+
+    def sources():  # idle, removable crews at non-short branches (not yet moved), biggest first then name
+        out = [c for c in crews
+               if is_idle(c) and deficit(c["home_branch_id"]) <= 0
+               and c["id"] not in moved_ids and keeps_coverage(c)]
         out.sort(key=lambda c: (-cap_of(c), c.get("name", "")))
         return out
 
@@ -511,7 +572,8 @@ def _plan_fleet_changes(
     # TIER 1: close >55 deficits, cheapest lever first.
     for bid in sorted([b for b in branch_ids if deficit(b) > 0], key=lambda b: -deficit(b)):
         while deficit(bid) > 0:
-            srcs = [s for s in sources() if s["home_branch_id"] != bid]
+            srcs = [s for s in sources()
+                    if s["home_branch_id"] != bid and same_cluster(s["home_branch_id"], bid)]
             if not srcs:
                 break
             relocate(srcs[0], bid, "deficit")
@@ -537,7 +599,8 @@ def _plan_fleet_changes(
         )
         moved = False
         for tb in targets:
-            src = next((s for s in srcs if s["home_branch_id"] != tb), None)
+            src = next((s for s in srcs
+                        if s["home_branch_id"] != tb and same_cluster(s["home_branch_id"], tb)), None)
             if src is None:
                 continue
             relocate(src, tb, "rebalance")
@@ -546,10 +609,22 @@ def _plan_fleet_changes(
         if not moved:
             break
 
-    # Surplus: idle crews with no beneficial target (flagged, never disbanded).
+    # Surplus: idle crews a branch could shed while still covering its own demand, that
+    # weren't relocated (no useful same-cluster target). These are honest downsize candidates;
+    # a branch's last needed crew is NOT surplus.
     surplus: dict[str, int] = {}
-    for s in sources():
-        surplus[s["home_branch_id"]] = surplus.get(s["home_branch_id"], 0) + 1
+    for bid in branch_ids:
+        idle_here = [c for c in crews_at.get(bid, []) if is_idle(c)]
+        if not idle_here:
+            continue
+        cap = branch_cap(bid)
+        removable = 0
+        for c in sorted(idle_here, key=cap_of):  # drop smallest first to maximize removable (surplus) count
+            if cap - cap_of(c) >= demand.get(bid, 0.0):
+                cap -= cap_of(c)
+                removable += 1
+        if removable:
+            surplus[bid] = removable
 
     # --- assemble output ---
     def counts(crew_list):
@@ -636,6 +711,101 @@ def _build_recommendation(
         "residual_unassigned": {"count": len(unassigned_ids),
                                 "labor_hours": round(sum(prop_labor.get(pid, 0.0) for pid in unassigned_ids), 1)},
     }
+
+
+def _apply_extra_additions(
+    plan: dict[str, Any],
+    extra: dict[str, dict[str, int]],
+    branch_name: dict[str, str],
+    capex_usd: float,
+) -> dict[str, Any]:
+    """Fold crews bought during the coverage loop back into an assembled plan dict (in place):
+    per-branch added/crews_after, changes.additions, and totals (new_crews/fleet_after/net_capital).
+
+    Call once per plan with the full set of loop-bought crews. NOT idempotent: calling twice with
+    the same `extra` double-counts new_crews and corrupts net_capital."""
+    total_new = 0
+    for bid, sizes in extra.items():
+        b = plan["branches"].setdefault(bid, {
+            "crews_before": {"two": 0, "three": 0}, "crews_after": {"two": 0, "three": 0},
+            "relocated_in": [], "upsized": 0, "added": {"two": 0, "three": 0},
+        })
+        for size_key, size in (("two", 2), ("three", 3)):
+            n = sizes.get(size_key, 0)
+            if not n:
+                continue
+            total_new += n
+            b["added"][size_key] = b["added"].get(size_key, 0) + n
+            b["crews_after"][size_key] = b["crews_after"].get(size_key, 0) + n
+            label = branch_name.get(bid, bid)
+            row = next((a for a in plan["changes"]["additions"]
+                        if a["branch_name"] == label and a["size"] == size), None)
+            if row:
+                row["count"] += n
+            else:
+                plan["changes"]["additions"].append(
+                    {"branch_name": label, "size": size, "count": n})
+    if total_new:
+        plan["totals"]["new_crews"] += total_new
+        plan["totals"]["fleet_after"] += total_new
+        plan["totals"]["net_capital_usd"] = int(plan["totals"]["new_crews"] * float(capex_usd))
+    return plan
+
+
+def _cover_residual(
+    proposed_crews: list[dict[str, Any]],
+    by_branch: dict[str, list[dict[str, Any]]],
+    prop_labor: dict[str, float],
+    branch_name: dict[str, str],
+    validate: Callable[[list[dict[str, Any]]], dict[str, Any]],
+    max_rounds: int = _REC_MAX_RUNS,
+) -> tuple[dict[str, Any], dict[str, dict[str, int]], list[dict[str, Any]], int]:
+    """Close the loop between the planner's aggregate model and the real routing solve.
+
+    Validate the proposed fleet; for every routable-but-stranded property, buy a crew at the
+    property's branch (3-person if any stranded property there exceeds CAP2, else 2-person) and
+    re-validate. Stop when nothing is stranded, the round budget is spent, or a round fails to
+    reduce the unassigned count (genuinely un-routable -> surfaced as a true limit). Returns
+    (final_result, extra_additions_by_branch, proposed_crews_incl_bought, validate_count).
+    """
+    prop_branch = {p["id"]: bid for bid, props in by_branch.items() for p in props}
+    crews = list(proposed_crews)
+    extra: dict[str, dict[str, int]] = {}
+    new_idx: dict[str, int] = {}
+    validate_count = 0
+
+    if not crews:
+        return {"crew_utilization": [], "unassigned_property_ids": []}, extra, crews, 0
+
+    result = validate(crews)
+    validate_count += 1
+
+    rounds = 0
+    while rounds < max_rounds:
+        unassigned = result.get("unassigned_property_ids", []) or []
+        actionable = [pid for pid in unassigned if pid in prop_branch]
+        if not actionable:
+            break
+        prev_count = len(unassigned)
+        by_b: dict[str, list[str]] = {}
+        for pid in actionable:
+            by_b.setdefault(prop_branch[pid], []).append(pid)
+        for bid, pids in by_b.items():
+            big = any(prop_labor.get(pid, 0.0) > _REC_CAP2 for pid in pids)
+            size = 3 if big else 2
+            k = new_idx.get(bid, 0) + 1
+            new_idx[bid] = k
+            # offset index keeps these ids distinct from planner-bought rec crews
+            crews.append(_make_rec_crew(bid, _REC_LOOP_CREW_ID_OFFSET + k, size, branch_name.get(bid, bid)))
+            sk = "three" if size == 3 else "two"
+            extra.setdefault(bid, {})
+            extra[bid][sk] = extra[bid].get(sk, 0) + 1
+        rounds += 1
+        result = validate(crews)
+        validate_count += 1
+        if len(result.get("unassigned_property_ids", []) or []) >= prev_count:
+            break  # no improvement => remaining stranded work is genuinely un-routable
+    return result, extra, crews, validate_count
 
 
 def _classify_capacity(avg_clock_per_crew: float) -> tuple[str, str]:
@@ -907,7 +1077,8 @@ def run_optimization(payload: dict[str, Any], time_limit_seconds: int = 8) -> di
 
 def run_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
     """recommend mode: baseline validate -> capital-aware plan -> proposed validate
-    (+ bounded refine) -> persist what-if run + delta recommendation."""
+    -> coverage feedback loop (buy near stranded props + re-validate) -> persist what-if
+    run + delta recommendation."""
     started = time.time()
     rec_id = payload.get("recommendation_id")
     try:
@@ -932,8 +1103,10 @@ def run_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
         util_before = {u["crew_id"]: float(u.get("clock_hours", 0.0)) for u in baseline.get("crew_utilization", [])}
         util_before_pct = {u["crew_id"]: float(u.get("util_pct", 0.0)) for u in baseline.get("crew_utilization", [])}
 
+        clusters = _branch_clusters(branches)
         # 2) plan deltas
-        plan = _plan_fleet_changes(current_crews, by_branch, util_before, branch_name, capex_usd)
+        plan = _plan_fleet_changes(current_crews, by_branch, util_before, branch_name,
+                                   capex_usd, clusters=clusters)
 
         # attach per-branch before-util for the builder
         before_at: dict[str, list[str]] = {}
@@ -944,11 +1117,17 @@ def run_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
             vals = [util_before_pct.get(cid, 0.0) for cid in ids]
             plan["branches"].setdefault(bid, {})["util_before_pct"] = round(sum(vals) / len(vals), 1) if vals else 0.0
 
-        # 3) validate proposed fleet (+ bounded refine handled by the planner's tight caps;
-        #    one validate is sufficient — the planner already sizes to the 55h ceiling).
+        # 3) validate proposed fleet, then close the loop: buy crews near any routable-but-stranded
+        #    property and re-validate until covered, budget-spent, or no improvement. Bought crews
+        #    are folded back into the plan so capital/new-crew headlines reflect them.
         proposed = plan["proposed_crews"]
-        result = validate(proposed) if proposed else baseline
-        iterations = (1 if current_crews else 0) + (1 if proposed else 0)
+        if proposed:
+            result, extra_adds, proposed, vcount = _cover_residual(
+                proposed, by_branch, prop_labor, branch_name, validate)
+            _apply_extra_additions(plan, extra_adds, branch_name, capex_usd)
+        else:
+            result, vcount = baseline, 0
+        iterations = (1 if current_crews else 0) + vcount
 
         # 4) persist what-if run, link it
         run_id = None
