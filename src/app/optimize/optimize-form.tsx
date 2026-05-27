@@ -17,7 +17,7 @@ export function OptimizeForm({ defaultWeek, ready }: { defaultWeek: string; read
         setError(null);
         startTransition(async () => {
           const result = await startOptimization(fd);
-          if (result.ok && result.run_id) {
+          if (result.ok) {
             router.push(`/runs/${result.run_id}`);
           } else {
             setError(result.error ?? 'Failed to start optimization');
