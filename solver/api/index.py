@@ -1077,7 +1077,8 @@ def run_optimization(payload: dict[str, Any], time_limit_seconds: int = 8) -> di
 
 def run_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
     """recommend mode: baseline validate -> capital-aware plan -> proposed validate
-    (+ bounded refine) -> persist what-if run + delta recommendation."""
+    -> coverage feedback loop (buy near stranded props + re-validate) -> persist what-if
+    run + delta recommendation."""
     started = time.time()
     rec_id = payload.get("recommendation_id")
     try:
