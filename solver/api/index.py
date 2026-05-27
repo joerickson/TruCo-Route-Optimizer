@@ -27,6 +27,7 @@ import json
 import math
 import os
 import sys
+import threading
 import time
 import traceback
 import urllib.error
@@ -871,8 +872,21 @@ class handler(BaseHTTPRequestHandler):
             run_id = payload.get("run_id")
             mode = payload.get("mode", "optimize")
             if mode == "recommend":
-                # run_recommendation writes its own crew_recommendations row.
-                result = run_recommendation(payload)
+                # Recommendation is a long job (minutes: an analytical seed + several
+                # full validate solves). Holding the HTTP connection that long gets it
+                # cut by the proxy ("fetch failed" on the caller). Ack immediately and
+                # run it on a background thread — run_recommendation writes its own
+                # crew_recommendations row (completed/failed) when done; the web polls
+                # that row. The container is long-lived (Coolify), so the thread
+                # survives past this response.
+                threading.Thread(target=run_recommendation, args=(payload,), daemon=True).start()
+                self.send_response(200)
+                self.send_header("content-type", "application/json")
+                self.end_headers()
+                self.wfile.write(
+                    json.dumps({"status": "accepted", "recommendation_id": payload.get("recommendation_id")}).encode("utf-8")
+                )
+                return
             elif mode == "evaluate":
                 result = run_evaluation(payload)
                 if run_id:
