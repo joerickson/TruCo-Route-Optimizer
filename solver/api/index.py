@@ -910,13 +910,13 @@ def run_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
     (+ bounded refine) -> persist what-if run + delta recommendation."""
     started = time.time()
     rec_id = payload.get("recommendation_id")
-    branches = payload["branches"]
-    properties = payload["properties"]
-    current_crews = payload.get("crews", [])
-    capex_usd = float(payload.get("capex_usd") or _REC_DEFAULT_CREW_CAPEX_USD)
-    target_week = payload.get("target_week")
-    rec_name = payload.get("name") or "Fleet recommendation"
     try:
+        branches = payload["branches"]
+        properties = payload["properties"]
+        current_crews = payload.get("crews", [])
+        capex_usd = float(payload.get("capex_usd") or _REC_DEFAULT_CREW_CAPEX_USD)
+        target_week = payload.get("target_week")
+        rec_name = payload.get("name") or "Fleet recommendation"
         by_branch, unattributable = _attribute_to_branches(properties, branches)
         prop_labor = {p["id"]: float(p["est_labor_hours"]) for p in properties}
         branch_name = {b["id"]: b.get("name", b["id"]) for b in branches}
@@ -929,7 +929,7 @@ def run_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
 
         # 1) baseline: current fleet -> per-crew clock + avg per branch
         baseline = validate(current_crews) if current_crews else {"crew_utilization": []}
-        util_before = {u["crew_id"]: float(u["clock_hours"]) for u in baseline.get("crew_utilization", [])}
+        util_before = {u["crew_id"]: float(u.get("clock_hours", 0.0)) for u in baseline.get("crew_utilization", [])}
         util_before_pct = {u["crew_id"]: float(u.get("util_pct", 0.0)) for u in baseline.get("crew_utilization", [])}
 
         # 2) plan deltas
