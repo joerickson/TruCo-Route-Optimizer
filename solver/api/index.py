@@ -68,15 +68,79 @@ WEEKDAY_FIELDS = {
 }
 
 
-def _bucketize_properties(
-    properties: list[dict[str, Any]], crews: list[dict[str, Any]]
-) -> dict[int, list[dict[str, Any]]]:
-    """Distribute properties across the 5 weekdays.
+# Cross-day rebalance tunables.
+_DAY_CAPACITY_HEADROOM = 0.85  # leave ~15% of a day's labor capacity for drive time
+_MAX_REBALANCE_ROUNDS = 3
+_REBALANCE_TIME_CAP_SECONDS = 240
 
-    Strategy:
-      - If property has assigned_day_of_week, honor it (soft, but we don't move it here).
-      - Otherwise greedy round-robin in geographic order by latitude band, balancing total
-        labor hours across days. Cheap heuristic — solver does the real work within a day.
+
+def _day_capacities(
+    crews: list[dict[str, Any]], branches_by_id: dict[str, dict[str, Any]]
+) -> dict[int, float]:
+    """Usable person-hours each weekday (1..5) can absorb.
+
+    Sum (crew_size * max_clock_hours_per_day) over crews that work the day AND have
+    a geocoded home branch (same eligibility as _crews_for_day), scaled by a
+    headroom factor so a day isn't packed to 100% labor before drive time is added.
+    """
+    caps: dict[int, float] = {}
+    for d in (1, 2, 3, 4, 5):
+        field = WEEKDAY_FIELDS[d]
+        total = 0.0
+        for c in crews:
+            if not c.get(field):
+                continue
+            if not branches_by_id.get(c.get("home_branch_id")):
+                continue
+            total += int(c.get("crew_size") or 2) * float(c.get("max_clock_hours_per_day") or 8)
+        caps[d] = total * _DAY_CAPACITY_HEADROOM
+    return caps
+
+
+def _assigned_labor(day_chunks: list[dict[str, Any]], unassigned_ids: set[str]) -> float:
+    """Person-hours of a day's chunks that were actually placed (not unassigned)."""
+    return sum(float(c["labor_hours"]) for c in day_chunks if c["id"] not in unassigned_ids)
+
+
+def _pick_rebalance_day(
+    labor: float,
+    spare: dict[int, float],
+    work_days: list[int],
+    current_day: int,
+    tried_days: set[int],
+) -> int | None:
+    """The work-day with the most spare that fits `labor`, excluding the chunk's
+    current day and any day already tried for it. None if nothing qualifies."""
+    candidates = [
+        d for d in work_days
+        if d != current_day and d not in tried_days and spare.get(d, 0.0) >= labor
+    ]
+    if not candidates:
+        return None
+    return max(candidates, key=lambda d: spare[d])
+
+
+def _day_of(buckets: dict[int, list[dict[str, Any]]], chunk_id: str) -> int | None:
+    """Which day's bucket currently holds the chunk (None if not found)."""
+    for d, chunks in buckets.items():
+        if any(c["id"] == chunk_id for c in chunks):
+            return d
+    return None
+
+
+def _bucketize_properties(
+    properties: list[dict[str, Any]],
+    crews: list[dict[str, Any]],
+    day_caps: dict[int, float],
+) -> dict[int, list[dict[str, Any]]]:
+    """Distribute work-chunks across the 5 weekdays, respecting per-day capacity.
+
+    - Single-chunk properties honor their assigned day (sticky). Multi-chunk (split)
+      properties spread (free pool).
+    - Free chunks are placed first-fit-decreasing: largest first, onto the work-day
+      with the most remaining spare (capacity minus labor already there) that still
+      fits; if none fits, the max-spare day (it'll surface as unassigned / get
+      rebalanced). solve_day does the real routing within a day.
     """
     work_days = [d for d in (1, 2, 3, 4, 5) if any(c.get(WEEKDAY_FIELDS[d]) for c in crews)]
     if not work_days:
@@ -87,8 +151,6 @@ def _bucketize_properties(
     sticky: list[dict[str, Any]] = []
     free: list[dict[str, Any]] = []
     for p in properties:
-        # Single-chunk properties honor their assigned day. Multi-chunk (split)
-        # properties must span days, so they go into the free pool to spread.
         if p.get("chunk_count", 1) == 1 and p.get("assigned_day_of_week") in work_days:
             sticky.append(p)
         else:
@@ -97,14 +159,19 @@ def _bucketize_properties(
     for p in sticky:
         buckets[p["assigned_day_of_week"]].append(p)
 
-    # Sort free chunks by lat (rough geographic banding) then balance by labor-hours.
-    free.sort(key=lambda p: (float(p["lat"] or 0), float(p["lng"] or 0)))
-    day_loads: dict[int, float] = {d: sum(float(x["labor_hours"]) for x in buckets[d]) for d in work_days}
+    # Remaining spare = capacity minus sticky labor already placed.
+    spare: dict[int, float] = {
+        d: day_caps.get(d, 0.0) - sum(float(x["labor_hours"]) for x in buckets[d]) for d in work_days
+    }
 
+    # First-fit-decreasing: largest chunks first, onto the day with most spare that fits.
+    free.sort(key=lambda p: float(p["labor_hours"]), reverse=True)
     for p in free:
-        target = min(work_days, key=lambda d: day_loads[d])
+        labor = float(p["labor_hours"])
+        fits = [d for d in work_days if spare[d] >= labor]
+        target = max(fits, key=lambda d: spare[d]) if fits else max(work_days, key=lambda d: spare[d])
         buckets[target].append(p)
-        day_loads[target] += float(p["labor_hours"])
+        spare[target] -= labor
 
     return buckets
 
@@ -393,6 +460,35 @@ def run_evaluation(payload: dict[str, Any]) -> dict[str, Any]:
     return _aggregate_result(crews, all_routes, unassigned, properties, time.time() - started)
 
 
+def _solve_days(
+    days: list[int],
+    buckets: dict[int, list[dict[str, Any]]],
+    crews: list[dict[str, Any]],
+    branches_by_id: dict[str, dict[str, Any]],
+) -> tuple[dict[int, list[dict[str, Any]]], dict[int, list[str]]]:
+    """Solve each given day independently. Returns ({day: routes}, {day: unassigned_chunk_ids}).
+
+    A day with chunks but no eligible crew marks all its chunks unassigned (matches
+    the prior per-day behavior)."""
+    routes_by_day: dict[int, list[dict[str, Any]]] = {}
+    unassigned_by_day: dict[int, list[str]] = {}
+    for day in days:
+        chunks = buckets.get(day, [])
+        if not chunks:
+            routes_by_day[day] = []
+            unassigned_by_day[day] = []
+            continue
+        crews_today = _crews_for_day(crews, branches_by_id, day)
+        if not crews_today:
+            routes_by_day[day] = []
+            unassigned_by_day[day] = [c["id"] for c in chunks]
+            continue
+        result = solve_day(day, chunks, crews_today, time_limit_seconds=8)
+        routes_by_day[day] = result["routes"]
+        unassigned_by_day[day] = result.get("unassigned", [])
+    return routes_by_day, unassigned_by_day
+
+
 def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
     started = time.time()
     crews = payload["crews"]
@@ -401,26 +497,54 @@ def run_optimization(payload: dict[str, Any]) -> dict[str, Any]:
 
     branches_by_id = {b["id"]: b for b in branches}
     solver_props = _properties_for_solver(properties, crews)
-    buckets = _bucketize_properties(solver_props, crews)
+    day_caps = _day_capacities(crews, branches_by_id)
+    buckets = _bucketize_properties(solver_props, crews, day_caps)
+    work_days = sorted(buckets.keys())
+    chunk_by_id = {c["id"]: c for c in solver_props}
 
-    all_routes: list[dict[str, Any]] = []
-    unassigned: list[str] = []
+    # Initial solve of every day.
+    routes_by_day, unassigned_by_day = _solve_days(work_days, buckets, crews, branches_by_id)
 
-    for day, props_for_day in buckets.items():
-        if not props_for_day:
-            continue
-        crews_today = _crews_for_day(crews, branches_by_id, day)
-        if not crews_today:
-            unassigned.extend(p["id"] for p in props_for_day)
-            continue
-        # Per-day OR-Tools time. GLS metaheuristic uses the FULL time budget
-        # even on tiny inputs, so this multiplies by # of non-empty days.
-        # Vercel's edge proxy kills connections with no first-byte-out within
-        # 60s, so total budget must stay well under that (5 days × 8s = 40s).
-        result = solve_day(day, props_for_day, crews_today, time_limit_seconds=8)
-        all_routes.extend(result["routes"])
-        unassigned.extend(result.get("unassigned", []))
+    # Bounded cross-day rebalance: move still-unassigned chunks to days with spare
+    # capacity and re-solve only the changed days. A `tried` set prevents cycling;
+    # moves are monotonic (a day with spare won't evict its placed chunks), so this
+    # never lowers the assigned count vs the initial solve.
+    tried: dict[str, set[int]] = {}
+    for _round in range(_MAX_REBALANCE_ROUNDS):
+        if (time.time() - started) > _REBALANCE_TIME_CAP_SECONDS:
+            break
+        unassigned_ids = [cid for d in work_days for cid in unassigned_by_day[d]]
+        if not unassigned_ids:
+            break
+        spare = {
+            d: day_caps.get(d, 0.0) - _assigned_labor(buckets[d], set(unassigned_by_day[d]))
+            for d in work_days
+        }
+        dirty: set[int] = set()
+        for cid in sorted(unassigned_ids, key=lambda c: float(chunk_by_id[c]["labor_hours"]), reverse=True):
+            chunk = chunk_by_id[cid]
+            cur_day = _day_of(buckets, cid)
+            if cur_day is None:
+                continue
+            target = _pick_rebalance_day(
+                float(chunk["labor_hours"]), spare, work_days, cur_day, tried.get(cid, set())
+            )
+            if target is None:
+                continue
+            buckets[cur_day].remove(chunk)
+            buckets[target].append(chunk)
+            spare[target] -= float(chunk["labor_hours"])
+            tried.setdefault(cid, set()).add(target)
+            dirty.add(cur_day)
+            dirty.add(target)
+        if not dirty:
+            break
+        re_routes, re_unassigned = _solve_days(sorted(dirty), buckets, crews, branches_by_id)
+        routes_by_day.update(re_routes)
+        unassigned_by_day.update(re_unassigned)
 
+    all_routes = [r for d in work_days for r in routes_by_day[d]]
+    unassigned = [cid for d in work_days for cid in unassigned_by_day[d]]
     return _aggregate_result(crews, all_routes, unassigned, properties, time.time() - started)
 
 
