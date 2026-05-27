@@ -1116,11 +1116,17 @@ def run_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
             vals = [util_before_pct.get(cid, 0.0) for cid in ids]
             plan["branches"].setdefault(bid, {})["util_before_pct"] = round(sum(vals) / len(vals), 1) if vals else 0.0
 
-        # 3) validate proposed fleet (+ bounded refine handled by the planner's tight caps;
-        #    one validate is sufficient — the planner already sizes to the 55h ceiling).
+        # 3) validate proposed fleet, then close the loop: buy crews near any routable-but-stranded
+        #    property and re-validate until covered, budget-spent, or no improvement. Bought crews
+        #    are folded back into the plan so capital/new-crew headlines reflect them.
         proposed = plan["proposed_crews"]
-        result = validate(proposed) if proposed else baseline
-        iterations = (1 if current_crews else 0) + (1 if proposed else 0)
+        if proposed:
+            result, extra_adds, proposed, vcount = _cover_residual(
+                proposed, by_branch, prop_labor, branch_name, validate)
+            _apply_extra_additions(plan, extra_adds, branch_name, capex_usd)
+        else:
+            result, vcount = baseline, 0
+        iterations = (1 if current_crews else 0) + vcount
 
         # 4) persist what-if run, link it
         run_id = None
