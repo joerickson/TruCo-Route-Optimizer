@@ -780,6 +780,7 @@ def run_recommendation(payload: dict[str, Any]) -> dict[str, Any]:
                 rm = set(removes)
                 fleet = [c for c in fleet if c["id"] not in rm]
             for branch_id, size in adds:
+                # start added-crew indices well above the seed fleet's 1-based ids to avoid collisions
                 k = next_idx.get(branch_id, 1000) + 1
                 next_idx[branch_id] = k
                 fleet.append(_make_rec_crew(branch_id, k, size))
@@ -890,7 +891,7 @@ class handler(BaseHTTPRequestHandler):
             self.wfile.write(json.dumps(result).encode("utf-8"))
         except Exception as e:
             err = {"status": "failed", "error": str(e), "trace": traceback.format_exc()[-500:]}
-            if run_id := (locals().get("run_id")):
+            if (locals().get("mode") != "recommend") and (run_id := (locals().get("run_id"))):
                 try:
                     _supabase_patch("optimization_runs", run_id, {
                         "status": "failed",
