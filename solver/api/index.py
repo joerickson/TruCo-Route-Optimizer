@@ -800,7 +800,7 @@ def _cover_residual(
         if not targets:
             break
         unassigned = result.get("unassigned_property_ids", []) or []
-        probes: dict[str, str] = {}  # branch_id -> probe crew id bought this round
+        probes: dict[str, tuple[str, int]] = {}  # branch_id -> (probe crew id, size) bought this round
         for bid in targets:
             pids = [pid for pid in unassigned if prop_branch.get(pid) == bid]
             size = 3 if any(prop_labor.get(pid, 0.0) > _REC_CAP2 for pid in pids) else 2
@@ -809,16 +809,16 @@ def _cover_residual(
             # offset index keeps these ids distinct from planner-bought rec crews
             crew = _make_rec_crew(bid, _REC_LOOP_CREW_ID_OFFSET + k, size, branch_name.get(bid, bid))
             crews.append(crew)
-            probes[bid] = crew["id"]
+            probes[bid] = (crew["id"], size)
         rounds += 1
         result = validate(crews)
         validate_count += 1
         after = stranded_by_branch(result)
         rolled_back = False
-        for bid, cid in probes.items():
+        for bid, (cid, size) in probes.items():
             if after.get(bid, 0) < before.get(bid, 0):
                 # the probe reduced this branch's stranded work -> keep it; branch stays active
-                sk = "three" if any(c["id"] == cid and c["crew_size"] == 3 for c in crews) else "two"
+                sk = "three" if size == 3 else "two"
                 extra.setdefault(bid, {})
                 extra[bid][sk] = extra[bid].get(sk, 0) + 1
             else:
