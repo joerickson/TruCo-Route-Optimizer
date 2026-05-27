@@ -55,7 +55,7 @@ export default async function RecommendPage() {
 
       {rec && rec.status === 'completed' && rec.result_jsonb && (
         <>
-          <RecommendTable result={rec.result_jsonb} />
+          <RecommendTable result={rec.result_jsonb} runId={rec.optimization_run_id} />
           <p className="text-xs text-muted-foreground">
             {rec.iterations ?? 0} solver round(s) · {rec.solver_runtime_seconds ?? 0}s. Analytical seed validated by the
             optimizer; capacity assumes ~50 sustainable clock-hrs/crew/wk. Create these crews and run the optimizer to confirm.
