@@ -36,7 +36,11 @@ export function UploadScheduleButton({ defaultWeek }: { defaultWeek: string }) {
             <DialogDescription>
               A CSV/XLSX keyed by <code>External ID</code> with <code>Crew</code> and <code>Day</code>{' '}
               columns. Properties must already exist (from an Aspire import). Scoring runs the same
-              solver in evaluate mode and creates a baseline run.
+              solver in evaluate mode and creates a baseline run.{' '}
+              <a href="/compare/schedule-template" className="text-primary underline-offset-2 hover:underline">
+                Download a pre-filled template
+              </a>{' '}
+              (your active properties with blank Crew/Day to fill).
             </DialogDescription>
           </DialogHeader>
           <form

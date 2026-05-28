@@ -19,7 +19,11 @@ export function ImportForm() {
           Upload an Aspire export (.xlsx or .csv). Columns expected: <code>Property</code>,{' '}
           <code>Property Address 1</code>, <code>Property City</code>, <code>Service Abr</code>, <code>Est Hrs</code>,{' '}
           <code>Opportunity Start Date</code>, <code>Opportunity End Date</code>. Re-uploading is safe — existing properties
-          (matched by external ID, or by name + address) are updated rather than duplicated.
+          (matched by external ID, or by name + address) are updated rather than duplicated. Not sure of the format?{' '}
+          <a href="/properties/aspire-template" className="text-primary underline-offset-2 hover:underline">
+            Download a template
+          </a>
+          .
         </CardDescription>
       </CardHeader>
       <CardContent className="space-y-4">
