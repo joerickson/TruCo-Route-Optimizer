@@ -57,6 +57,9 @@ export function ActualHoursForm() {
         {result && (
           <div className="rounded-md border bg-muted/40 p-3 text-sm space-y-1">
             <div className="flex flex-wrap items-center gap-x-4 gap-y-1">
+              <span className="text-muted-foreground">
+                <strong>{result.parsed ?? 0}</strong> values read
+              </span>
               <span>
                 <strong>{result.updated}</strong> properties updated
               </span>
