@@ -3,6 +3,7 @@ import { revalidatePath } from 'next/cache';
 import { getServiceClient } from '@/lib/supabase';
 import { parseScheduleFile, parseDayOfWeek, resolveCrewId } from '@/lib/schedule-import';
 import type { Branch, Crew, Property } from '@/lib/types';
+import { withEffectiveLabor } from '@/lib/effective-labor';
 
 const PYTHON_SOLVER_URL = process.env.PYTHON_SOLVER_URL ?? '';
 
@@ -126,7 +127,7 @@ async function invokeEvaluate(runId: string, payload: { crews: Crew[]; branches:
   const res = await fetch(PYTHON_SOLVER_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ run_id: runId, ...payload, mode: 'evaluate' }),
+    body: JSON.stringify({ run_id: runId, ...payload, properties: withEffectiveLabor(payload.properties), mode: 'evaluate' }),
   });
   if (!res.ok) throw new Error(`Solver returned ${res.status}: ${await res.text()}`);
 }

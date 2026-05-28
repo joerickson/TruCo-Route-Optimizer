@@ -7,6 +7,7 @@ import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
 import type { Property, ServiceType } from '@/lib/types';
+import { laborVariance } from '@/lib/effective-labor';
 import { updateProperty } from './actions';
 
 const SERVICE_LABELS: Record<ServiceType, string> = {
@@ -21,6 +22,7 @@ export function PropertyEditForm({ property }: { property: Property }) {
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
+  const variance = property.actual_hours_per_week != null ? laborVariance(property) : null;
 
   if (!editing) {
     return (
@@ -35,7 +37,22 @@ export function PropertyEditForm({ property }: { property: Property }) {
               <Badge variant="secondary">{SERVICE_LABELS[property.service_type]}</Badge>
               <span>
                 <strong>{property.est_labor_hours.toFixed(1)}</strong> labor hrs / visit
+                <span className="text-muted-foreground"> (budget)</span>
               </span>
+              {variance && (
+                <span>
+                  actual <strong>{property.actual_hours_per_week!.toFixed(1)}</strong> h/wk
+                  {variance.perVisitActual != null && (
+                    <span className="text-muted-foreground"> (~{variance.perVisitActual.toFixed(1)} h/visit)</span>
+                  )}
+                  {variance.pct != null && (
+                    <Badge variant={variance.applied ? 'warning' : 'secondary'} className="ml-2">
+                      {variance.pct >= 0 ? '+' : ''}
+                      {(variance.pct * 100).toFixed(0)}% · {variance.applied ? 'driving schedule' : 'within budget'}
+                    </Badge>
+                  )}
+                </span>
+              )}
               {(property.contract_start_date || property.contract_end_date) && (
                 <span className="text-muted-foreground">
                   Contract: {property.contract_start_date ?? '—'} → {property.contract_end_date ?? '—'}

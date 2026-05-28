@@ -4,6 +4,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { Badge } from '@/components/ui/badge';
 import { getServerClient } from '@/lib/supabase';
 import { ImportForm } from './import-form';
+import { ActualHoursForm } from './actual-hours-form';
 import { ViewToggle } from './view-toggle';
 import { PropertiesMapLoader } from './properties-map-loader';
 import type { Property } from '@/lib/types';
@@ -72,6 +73,8 @@ export default async function PropertiesPage({
       </div>
 
       <ImportForm />
+
+      <ActualHoursForm />
 
       {lastImport && (
         <div className="rounded-md border bg-muted/40 px-4 py-2 text-sm">

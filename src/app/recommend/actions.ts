@@ -2,6 +2,7 @@
 import { revalidatePath } from 'next/cache';
 import { getServiceClient } from '@/lib/supabase';
 import type { Branch, Crew, Property } from '@/lib/types';
+import { withEffectiveLabor } from '@/lib/effective-labor';
 
 const PYTHON_SOLVER_URL = process.env.PYTHON_SOLVER_URL ?? '';
 
@@ -73,7 +74,12 @@ async function invokeRecommend(
   const res = await fetch(PYTHON_SOLVER_URL, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ recommendation_id: recId, mode: 'recommend', ...payload }),
+    body: JSON.stringify({
+      recommendation_id: recId,
+      mode: 'recommend',
+      ...payload,
+      properties: withEffectiveLabor(payload.properties),
+    }),
   });
   if (!res.ok) throw new Error(`Solver returned ${res.status}: ${await res.text()}`);
 }
