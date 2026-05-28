@@ -4,6 +4,7 @@ import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@
 import { getServerClient } from '@/lib/supabase';
 import type { OptimizationRun, Property, Crew } from '@/lib/types';
 import { formatHours } from '@/lib/utils';
+import { effectiveLaborHours } from '@/lib/effective-labor';
 
 export const dynamic = 'force-dynamic';
 
@@ -32,12 +33,13 @@ export default async function CapacityPage() {
   const latestRun = runData as OptimizationRun | null;
 
   // Static demand math (no solver required)
+  // Use actual-corrected labor where an upload diverges from budget (see effective-labor.ts).
   const totalLaborHrsAvgWk = properties.reduce(
-    (sum, p) => sum + p.est_labor_hours * (DEMAND_WEIGHT[p.service_type] ?? 0),
+    (sum, p) => sum + effectiveLaborHours(p) * (DEMAND_WEIGHT[p.service_type] ?? 0),
     0
   );
   const peakLaborHrsWk = properties.reduce(
-    (sum, p) => sum + p.est_labor_hours * (p.service_type === 'monthly' ? 1 / 4.33 : 1),
+    (sum, p) => sum + effectiveLaborHours(p) * (p.service_type === 'monthly' ? 1 / 4.33 : 1),
     0
   );
 

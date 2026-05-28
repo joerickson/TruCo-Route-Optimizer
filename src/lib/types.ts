@@ -58,6 +58,7 @@ export interface Property {
   geocoded_at: string | null;
   service_type: ServiceType;
   est_labor_hours: number;
+  actual_hours_per_week: number | null;
   contract_start_date: string | null;
   contract_end_date: string | null;
   preferred_day_of_week: number | null;
