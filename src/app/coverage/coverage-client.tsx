@@ -1,5 +1,5 @@
 'use client';
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
@@ -17,15 +17,36 @@ function csvCell(v: string | number): string {
 export function CoverageClient({ branches, properties }: { branches: MapBranch[]; properties: MapProperty[] }) {
   const [selectedIds, setSelectedIds] = useState<string[]>(branches.map((b) => b.id));
   const [radius, setRadius] = useState<number>(25);
+  const branchIds = useMemo(() => branches.map((b) => b.id), [branches]);
+  const selectedBranchIds = useMemo(() => {
+    const branchIdSet = new Set(branchIds);
+    const retained = selectedIds.filter((id) => branchIdSet.has(id));
+    return retained.length === 0 && selectedIds.length > 0 ? branchIds : retained;
+  }, [branchIds, selectedIds]);
+
+  useEffect(() => {
+    setSelectedIds((prev) => {
+      const branchIdSet = new Set(branchIds);
+      const retained = prev.filter((id) => branchIdSet.has(id));
+      const next = retained.length === 0 && prev.length > 0 ? branchIds : retained;
+      if (next.length === prev.length && next.every((id, i) => id === prev[i])) return prev;
+      return next;
+    });
+  }, [branchIds]);
 
   const matches = useMemo(
-    () => sitesWithinRadius(properties, branches, selectedIds, radius),
-    [properties, branches, selectedIds, radius]
+    () => sitesWithinRadius(properties, branches, selectedBranchIds, radius),
+    [properties, branches, selectedBranchIds, radius]
   );
   const matchedIds = useMemo(() => new Set(matches.map((m) => m.property.id)), [matches]);
 
   function toggleBranch(id: string) {
     setSelectedIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
+  }
+
+  function updateRadius(value: string) {
+    const next = Number(value);
+    setRadius(Number.isFinite(next) ? Math.max(0, next) : 0);
   }
 
   function downloadCsv() {
@@ -62,7 +83,7 @@ export function CoverageClient({ branches, properties }: { branches: MapBranch[]
                 type="number"
                 min="1"
                 value={radius}
-                onChange={(e) => setRadius(Math.max(0, Number(e.target.value)))}
+                onChange={(e) => updateRadius(e.target.value)}
               />
             </div>
             <div className="flex flex-wrap items-center gap-2">
@@ -72,7 +93,7 @@ export function CoverageClient({ branches, properties }: { branches: MapBranch[]
                 </p>
               )}
               {branches.map((b) => {
-                const on = selectedIds.includes(b.id);
+                const on = selectedBranchIds.includes(b.id);
                 return (
                   <button
                     key={b.id}
@@ -91,7 +112,7 @@ export function CoverageClient({ branches, properties }: { branches: MapBranch[]
           <div className="flex flex-wrap items-center gap-4">
             <p className="text-sm">
               <strong>{matches.length}</strong> site{matches.length === 1 ? '' : 's'} within {radius} mi of{' '}
-              {selectedIds.length} branch{selectedIds.length === 1 ? '' : 'es'} (straight-line)
+              {selectedBranchIds.length} branch{selectedBranchIds.length === 1 ? '' : 'es'} (straight-line)
             </p>
             <Button type="button" variant="outline" onClick={downloadCsv} disabled={matches.length === 0}>
               Download CSV
@@ -103,7 +124,7 @@ export function CoverageClient({ branches, properties }: { branches: MapBranch[]
       <CoverageMapLoader
         properties={properties}
         branches={branches}
-        selectedBranchIds={selectedIds}
+        selectedBranchIds={selectedBranchIds}
         radiusMiles={radius}
         matchedIds={matchedIds}
       />

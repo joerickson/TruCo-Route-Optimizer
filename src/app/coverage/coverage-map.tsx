@@ -17,16 +17,29 @@ const MATCH_COLOR = '#10b981'; // emerald-500
 const DIM_COLOR = '#cbd5e1'; // slate-300
 const BRANCH_COLOR = '#ef4444'; // red-500
 const CIRCLE_COLOR = '#6366f1'; // indigo-500
+const EARTH_RADIUS_MI = 3958.8;
 
-// Approximate a geographic circle of `radiusMiles` as a polygon ring. Uses an
-// equirectangular approximation — fine at the scales here (tens of miles).
+// Approximate a geographic circle of `radiusMiles` as a geodesic polygon ring.
 function circleFeature(lng: number, lat: number, radiusMiles: number, points = 64): GeoJSON.Feature {
-  const latDeg = radiusMiles / 69; // ~69 statute miles per degree latitude
-  const lngDeg = radiusMiles / (69 * Math.cos((lat * Math.PI) / 180));
+  const toRad = (d: number) => (d * Math.PI) / 180;
+  const toDeg = (r: number) => (r * 180) / Math.PI;
+  const angularDistance = radiusMiles / EARTH_RADIUS_MI;
+  const latRad = toRad(lat);
+  const lngRad = toRad(lng);
   const coords: [number, number][] = [];
   for (let i = 0; i <= points; i++) {
-    const t = (i / points) * 2 * Math.PI;
-    coords.push([lng + lngDeg * Math.cos(t), lat + latDeg * Math.sin(t)]);
+    const bearing = (i / points) * 2 * Math.PI;
+    const pointLat = Math.asin(
+      Math.sin(latRad) * Math.cos(angularDistance) +
+        Math.cos(latRad) * Math.sin(angularDistance) * Math.cos(bearing)
+    );
+    const pointLng =
+      lngRad +
+      Math.atan2(
+        Math.sin(bearing) * Math.sin(angularDistance) * Math.cos(latRad),
+        Math.cos(angularDistance) - Math.sin(latRad) * Math.sin(pointLat)
+      );
+    coords.push([toDeg(pointLng), toDeg(pointLat)]);
   }
   return { type: 'Feature', geometry: { type: 'Polygon', coordinates: [coords] }, properties: {} };
 }
@@ -72,6 +85,7 @@ export default function CoverageMap({
 }: CoverageMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<mapboxgl.Map | null>(null);
+  const fittedKeyRef = useRef<string | null>(null);
   const [styleReady, setStyleReady] = useState(false);
   const token = process.env.NEXT_PUBLIC_MAPBOX_TOKEN;
 
@@ -172,12 +186,15 @@ export default function CoverageMap({
     );
   }, [styleReady, properties, branches, selectedBranchIds, radiusMiles, matchedIds]);
 
-  // Fit to selected branches + their circles once both are known.
+  // Fit when the selected branch set changes, but not for radius-only edits.
   useEffect(() => {
     const map = mapRef.current;
     if (!map || !styleReady) return;
     const selected = branches.filter((b) => selectedBranchIds.includes(b.id));
     if (selected.length === 0) return;
+    const fitKey = selected.map((b) => `${b.id}:${b.lat}:${b.lng}`).join('|');
+    if (fitKey === fittedKeyRef.current) return;
+    fittedKeyRef.current = fitKey;
     const bounds = new mapboxgl.LngLatBounds();
     const padDeg = radiusMiles > 0 ? radiusMiles / 60 : 0.2;
     for (const b of selected) {
