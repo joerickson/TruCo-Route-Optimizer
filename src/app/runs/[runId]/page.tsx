@@ -88,6 +88,10 @@ export default async function RunPage({
     };
   }
 
+  const propertyFilter =
+    (run.config_snapshot as { property_filter?: { anchor_branch_name: string; radius_miles: number } } | null)
+      ?.property_filter ?? null;
+
   return (
     <div className="space-y-6">
       {isPolling && <RunRefresher />}
@@ -102,6 +106,11 @@ export default async function RunPage({
           <p className="text-sm text-muted-foreground">
             Target week: {run.target_week_start_date} · created {new Date(run.created_at).toLocaleString()}
           </p>
+          {propertyFilter && (
+            <p className="text-sm text-muted-foreground">
+              Limited to {propertyFilter.radius_miles} mi around {propertyFilter.anchor_branch_name}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-3">
           {run.status === 'completed' && <RunViewToggle runId={run.id} current={view} branch={branchFilter} />}

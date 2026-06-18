@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { getServerClient } from '@/lib/supabase';
 import type { OptimizationRun } from '@/lib/types';
 import { OptimizeForm } from './optimize-form';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export const dynamic = 'force-dynamic';
 // Solver runs can take 60-90s; with waitUntil() the function must stay alive
@@ -21,15 +22,37 @@ function defaultPeakWeek(): string {
 
 export default async function OptimizePage() {
   const supabase = getServerClient();
-  const [{ data: runs }, { count: propCount }, { count: crewCount }, { count: branchCount }] = await Promise.all([
-    supabase.from('optimization_runs').select('*').eq('run_kind', 'optimized').order('created_at', { ascending: false }).limit(20),
-    supabase.from('properties').select('*', { count: 'exact', head: true }).eq('is_active', true).not('lat', 'is', null),
-    supabase.from('crews').select('*', { count: 'exact', head: true }).eq('is_active', true),
-    supabase.from('branches').select('*', { count: 'exact', head: true }).eq('is_active', true),
-  ]);
+  const scenarioId = await getActiveScenarioId();
+
+  if (!scenarioId) {
+    return (
+      <div className="space-y-6">
+        <div>
+          <h1 className="text-2xl font-bold tracking-tight">Optimize</h1>
+        </div>
+        <p className="text-sm text-muted-foreground">
+          No scenario selected. Please{' '}
+          <Link href="/scenarios" className="text-primary underline-offset-2 hover:underline">
+            select or create a scenario
+          </Link>{' '}
+          before running the optimizer.
+        </p>
+      </div>
+    );
+  }
+
+  const [{ data: runs }, { count: propCount }, { count: crewCount }, { count: branchCount }, { data: branchRows }] =
+    await Promise.all([
+      supabase.from('optimization_runs').select('*').eq('run_kind', 'optimized').eq('scenario_id', scenarioId).order('created_at', { ascending: false }).limit(20),
+      supabase.from('properties').select('*', { count: 'exact', head: true }).eq('is_active', true).eq('scenario_id', scenarioId).not('lat', 'is', null),
+      supabase.from('crews').select('*', { count: 'exact', head: true }).eq('is_active', true).eq('scenario_id', scenarioId),
+      supabase.from('branches').select('*', { count: 'exact', head: true }).eq('is_active', true).eq('scenario_id', scenarioId),
+      supabase.from('branches').select('id, name').eq('is_active', true).eq('scenario_id', scenarioId).not('lat', 'is', null),
+    ]);
 
   const ready = (propCount ?? 0) > 0 && (crewCount ?? 0) > 0 && (branchCount ?? 0) > 0;
   const recentRuns = (runs ?? []) as OptimizationRun[];
+  const anchorBranches = (branchRows ?? []) as { id: string; name: string }[];
 
   return (
     <div className="space-y-6">
@@ -49,7 +72,7 @@ export default async function OptimizePage() {
           </CardDescription>
         </CardHeader>
         <CardContent>
-          <OptimizeForm defaultWeek={defaultPeakWeek()} ready={ready} />
+          <OptimizeForm defaultWeek={defaultPeakWeek()} ready={ready} branches={anchorBranches} />
         </CardContent>
       </Card>
 
