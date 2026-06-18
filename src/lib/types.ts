@@ -12,8 +12,17 @@ export type CapacityRecommendation =
   | 'add_crew_recommended'
   | 'add_crew_required';
 
+export interface Scenario {
+  id: string;
+  name: string;
+  description: string | null;
+  is_default: boolean;
+  created_at: string;
+}
+
 export interface Branch {
   id: string;
+  scenario_id: string;
   name: string;
   address: string;
   city: string;
@@ -29,6 +38,7 @@ export interface Branch {
 
 export interface Crew {
   id: string;
+  scenario_id: string;
   name: string;
   crew_size: number;
   home_branch_id: string;
@@ -47,6 +57,7 @@ export interface Crew {
 
 export interface Property {
   id: string;
+  scenario_id: string;
   external_id: string | null;
   name: string;
   address: string;
@@ -114,6 +125,7 @@ export interface OptimizationRoutes {
 
 export interface OptimizationRun {
   id: string;
+  scenario_id: string;
   name: string;
   // 'optimized' = a solver optimization; 'baseline' = a scored current (unoptimized)
   // schedule, produced by the solver's evaluate mode. Both share this table.
