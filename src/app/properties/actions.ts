@@ -144,7 +144,8 @@ async function applyRows(rows: AspireImportRow[], scenarioId: string): Promise<{
     const { data: existing, error: existingErr } = await supabase
       .from('properties')
       .select('external_id')
-      .in('external_id', ids);
+      .in('external_id', ids)
+      .eq('scenario_id', scenarioId);
     if (existingErr) throw new Error(existingErr.message);
 
     const existingSet = new Set((existing ?? []).map((e: { external_id: string | null }) => e.external_id));
@@ -153,7 +154,7 @@ async function applyRows(rows: AspireImportRow[], scenarioId: string): Promise<{
 
     const { error } = await supabase.from('properties').upsert(
       withExt.map((r) => ({ external_id: r.external_id, ...toDbRow(r), scenario_id: scenarioId })),
-      { onConflict: 'external_id' },
+      { onConflict: 'scenario_id,external_id' },
     );
     if (error) throw new Error(error.message);
   }
@@ -162,7 +163,8 @@ async function applyRows(rows: AspireImportRow[], scenarioId: string): Promise<{
     // Pull existing (id, name, address) so we can match in-app. With ~600 rows this is fine.
     const { data: existing, error: fetchErr } = await supabase
       .from('properties')
-      .select('id, name, address');
+      .select('id, name, address')
+      .eq('scenario_id', scenarioId);
     if (fetchErr) throw new Error(fetchErr.message);
 
     const keyOf = (n: string, a: string) => `${n.trim().toLowerCase()}::${a.trim().toLowerCase()}`;

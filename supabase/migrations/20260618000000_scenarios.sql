@@ -35,6 +35,10 @@ alter table branches          alter column scenario_id set not null;
 alter table optimization_runs alter column scenario_id set not null;
 
 create index if not exists properties_scenario_idx        on properties(scenario_id);
+
+-- Per-scenario uniqueness for Aspire/CSV external ids (NULLs are distinct, so
+-- many properties without an external_id can coexist in a scenario).
+create unique index if not exists properties_scenario_external_idx on properties(scenario_id, external_id);
 create index if not exists crews_scenario_idx             on crews(scenario_id);
 create index if not exists branches_scenario_idx          on branches(scenario_id);
 create index if not exists optimization_runs_scenario_idx on optimization_runs(scenario_id);
