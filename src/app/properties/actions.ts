@@ -231,12 +231,16 @@ function serializeRaw(raw: Record<string, unknown>): Record<string, unknown> {
 }
 
 export async function geocodePending(limit = 100) {
+  const scenarioId = await getActiveScenarioId();
+  if (!scenarioId) return { ok: false, error: 'No scenario selected' };
+
   const supabase = getServiceClient();
   const { data, error } = await supabase
     .from('properties')
     .select('id, address, city, state')
     .is('lat', null)
     .eq('is_active', true)
+    .eq('scenario_id', scenarioId)
     .limit(limit);
 
   if (error) return { ok: false, error: error.message };

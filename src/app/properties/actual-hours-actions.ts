@@ -3,6 +3,7 @@
 import { revalidatePath } from 'next/cache';
 import { getServiceClient } from '@/lib/supabase';
 import { parseActualHoursFile } from '@/lib/actual-hours-import';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export interface ActualHoursUploadResult {
   ok: boolean;
@@ -17,6 +18,9 @@ export async function uploadActualHours(formData: FormData): Promise<ActualHours
   const file = formData.get('file');
   if (!(file instanceof File) || file.size === 0) return { ok: false, error: 'No file selected' };
 
+  const scenarioId = await getActiveScenarioId();
+  if (!scenarioId) return { ok: false, error: 'No scenario selected' };
+
   let result;
   try {
     result = parseActualHoursFile(file.name, await file.arrayBuffer());
@@ -29,7 +33,8 @@ export async function uploadActualHours(formData: FormData): Promise<ActualHours
   const { data: props, error: loadErr } = await supabase
     .from('properties')
     .select('id, external_id, name')
-    .eq('is_active', true);
+    .eq('is_active', true)
+    .eq('scenario_id', scenarioId);
   if (loadErr) return { ok: false, error: `Could not load properties: ${loadErr.message}` };
 
   const byExt = new Map<string, string>();
