@@ -8,6 +8,7 @@ import type { Scenario } from '@/lib/types';
 const NAV = [
   { href: '/', label: 'Overview' },
   { href: '/properties', label: 'Properties' },
+  { href: '/coverage', label: 'Bid Area' },
   { href: '/crews', label: 'Crews' },
   { href: '/branches', label: 'Branches' },
   { href: '/optimize', label: 'Optimize' },
