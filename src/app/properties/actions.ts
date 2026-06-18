@@ -4,6 +4,7 @@ import { getServiceClient } from '@/lib/supabase';
 import { parseAspireFile, type AspireImportRow } from '@/lib/csv-import';
 import { geocodeAddress } from '@/lib/geocoding';
 import { resolveCrewId, parseDayOfWeek } from '@/lib/schedule-import';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export interface ImportSummary {
   ok: true;
@@ -31,6 +32,9 @@ export async function importAspireCsv(formData: FormData): Promise<ImportActionR
     if (totalRows === 0) {
       return { ok: false, error: 'No rows found in file' };
     }
+
+    const scenarioId = await getActiveScenarioId();
+    if (!scenarioId) return { ok: false, error: 'No scenario selected' };
 
     const supabase = getServiceClient();
 
@@ -68,7 +72,7 @@ export async function importAspireCsv(formData: FormData): Promise<ImportActionR
     let updated = 0;
 
     if (rows.length > 0) {
-      const result = await applyRows(rows);
+      const result = await applyRows(rows, scenarioId);
       inserted = result.inserted;
       updated = result.updated;
     }
@@ -126,7 +130,7 @@ export async function importAspireCsv(formData: FormData): Promise<ImportActionR
 // The previous implementation did one UPDATE per matched row, which on a 564-row
 // re-import meant ~80s of round-trips and timed out. Bulk upsert collapses each
 // branch to a single PostgREST call.
-async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; updated: number }> {
+async function applyRows(rows: AspireImportRow[], scenarioId: string): Promise<{ inserted: number; updated: number }> {
   const supabase = getServiceClient();
 
   let inserted = 0;
@@ -148,7 +152,7 @@ async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; u
     updated += withExt.filter((r) => existingSet.has(r.external_id)).length;
 
     const { error } = await supabase.from('properties').upsert(
-      withExt.map((r) => ({ external_id: r.external_id, ...toDbRow(r) })),
+      withExt.map((r) => ({ external_id: r.external_id, ...toDbRow(r), scenario_id: scenarioId })),
       { onConflict: 'external_id' },
     );
     if (error) throw new Error(error.message);
@@ -177,7 +181,7 @@ async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; u
 
     if (toInsert.length > 0) {
       const { error } = await supabase.from('properties').insert(
-        toInsert.map((r) => toDbRow(r)),
+        toInsert.map((r) => ({ ...toDbRow(r), scenario_id: scenarioId })),
       );
       if (error) throw new Error(error.message);
       inserted += toInsert.length;
