@@ -42,3 +42,9 @@ create unique index if not exists properties_scenario_external_idx on properties
 create index if not exists crews_scenario_idx             on crews(scenario_id);
 create index if not exists branches_scenario_idx          on branches(scenario_id);
 create index if not exists optimization_runs_scenario_idx on optimization_runs(scenario_id);
+
+-- crew_recommendations are derived from a scenario's fleet; scope them too.
+alter table crew_recommendations add column if not exists scenario_id uuid references scenarios(id) on delete cascade;
+update crew_recommendations set scenario_id = (select id from scenarios where is_default) where scenario_id is null;
+alter table crew_recommendations alter column scenario_id set not null;
+create index if not exists crew_recommendations_scenario_idx on crew_recommendations(scenario_id);

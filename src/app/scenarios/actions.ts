@@ -34,18 +34,6 @@ export async function createScenario(formData: FormData): Promise<Result> {
   return { ok: true };
 }
 
-export async function renameScenario(formData: FormData): Promise<Result> {
-  const id = String(formData.get('id') ?? '');
-  const name = String(formData.get('name') ?? '').trim();
-  if (!id || !name) return { ok: false, error: 'id and name required' };
-  const supabase = getServiceClient();
-  const { error } = await supabase.from('scenarios').update({ name }).eq('id', id);
-  if (error) return { ok: false, error: error.message };
-  revalidatePath('/scenarios');
-  revalidatePath('/', 'layout');
-  return { ok: true };
-}
-
 export async function deleteScenario(formData: FormData): Promise<Result> {
   const id = String(formData.get('id') ?? '');
   if (!id) return { ok: false, error: 'id required' };

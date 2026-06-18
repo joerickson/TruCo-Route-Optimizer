@@ -98,6 +98,7 @@ export async function importAspireCsv(formData: FormData): Promise<ImportActionR
         const { error: assignErr } = await supabase
           .from('properties')
           .update({ assigned_crew_id: crewId, assigned_day_of_week: day })
+          .eq('scenario_id', scenarioId)
           .in('external_id', externalIds);
         if (assignErr) console.error('Failed to apply schedule assignment:', assignErr.message);
       }

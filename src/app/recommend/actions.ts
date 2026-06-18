@@ -15,6 +15,7 @@ export async function startRecommendation(formData: FormData): Promise<Recommend
       String(formData.get('name') ?? '').trim() || `Fleet recommendation ${new Date().toISOString().slice(0, 16)}`;
     const supabase = getServiceClient();
     const scenarioId = await getActiveScenarioId();
+    if (!scenarioId) return { ok: false, error: 'No scenario selected' };
 
     const [{ data: branchesData }, { data: propsData }, { data: crewsData }] = await Promise.all([
       supabase.from('branches').select('*').eq('scenario_id', scenarioId ?? '').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
@@ -39,6 +40,7 @@ export async function startRecommendation(formData: FormData): Promise<Recommend
       .from('crew_recommendations')
       .insert({
         name,
+        scenario_id: scenarioId,
         status: 'running',
         active_branch_ids: branches.map((b) => b.id),
         active_property_ids: properties.map((p) => p.id),

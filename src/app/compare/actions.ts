@@ -30,6 +30,7 @@ export async function uploadAndScoreSchedule(formData: FormData): Promise<Schedu
 
     const supabase = getServiceClient();
     const scenarioId = await getActiveScenarioId();
+    if (!scenarioId) return { ok: false, error: 'No scenario selected' };
 
     // Build crew-name -> id map (case/space-insensitive).
     const { data: crewRows } = await supabase.from('crews').select('id, name').eq('scenario_id', scenarioId ?? '').eq('is_active', true);
@@ -66,6 +67,7 @@ export async function uploadAndScoreSchedule(formData: FormData): Promise<Schedu
       const { data: updated, error } = await supabase
         .from('properties')
         .update({ assigned_crew_id: crewId, assigned_day_of_week: day })
+        .eq('scenario_id', scenarioId)
         .in('external_id', externalIds)
         .select('id');
       if (error) throw new Error(error.message);
@@ -92,6 +94,7 @@ export async function uploadAndScoreSchedule(formData: FormData): Promise<Schedu
       .from('optimization_runs')
       .insert({
         name,
+        scenario_id: scenarioId,
         run_kind: 'baseline',
         target_week_start_date: targetWeek,
         active_branch_ids: branches.map((b) => b.id),
