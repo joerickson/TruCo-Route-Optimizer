@@ -26,10 +26,11 @@ export async function startOptimization(
 export async function launchOptimization(
   name: string,
   targetWeek: string,
-  filter?: { anchorBranchId: string | null; radiusMiles: number | null }
+  filter?: { anchorBranchId: string | null; radiusMiles: number | null },
+  scenarioIdOverride?: string
 ): Promise<{ ok: true; run_id: string } | { ok: false; error: string }> {
   const supabase = getServiceClient();
-  const scenarioId = await getActiveScenarioId();
+  const scenarioId = scenarioIdOverride ?? (await getActiveScenarioId());
   if (!scenarioId) return { ok: false, error: 'No scenario selected' };
 
   const [{ data: crewsData }, { data: branchesData }, { data: propsData }] = await Promise.all([

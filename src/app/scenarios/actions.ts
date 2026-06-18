@@ -38,13 +38,15 @@ export async function deleteScenario(formData: FormData): Promise<Result> {
   const id = String(formData.get('id') ?? '');
   if (!id) return { ok: false, error: 'id required' };
   const supabase = getServiceClient();
+  const cookieStore = cookies();
+  const activeScenarioId = cookieStore.get(ACTIVE_SCENARIO_COOKIE)?.value ?? null;
   const { data: scn } = await supabase.from('scenarios').select('is_default').eq('id', id).single();
   if (scn?.is_default) return { ok: false, error: 'The default scenario cannot be deleted' };
   // Cascade removes the scenario's properties/crews/branches/runs (FK on delete cascade).
   const { error } = await supabase.from('scenarios').delete().eq('id', id);
   if (error) return { ok: false, error: error.message };
   // If we just deleted the active scenario, the resolver falls back to default.
-  cookies().delete(ACTIVE_SCENARIO_COOKIE);
+  if (activeScenarioId === id) cookieStore.delete(ACTIVE_SCENARIO_COOKIE);
   revalidatePath('/scenarios');
   revalidatePath('/', 'layout');
   return { ok: true };

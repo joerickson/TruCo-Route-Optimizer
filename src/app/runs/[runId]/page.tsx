@@ -18,7 +18,6 @@ import type { RoutesMapCrew, RoutesMapDepot, RoutesMapUnassigned } from './route
 import { UnassignedBanner, UnassignedCard, UnassignedFix } from './run-unassigned';
 import { computePropertyCoverage, summarizeUnassigned, type UnassignedProp, type UnassignedSummary } from '@/lib/property-coverage';
 import { planUnassignedFix, type FixPlan, type FixUnassignedProp, type FixBranch, type FixCrew } from '@/lib/unassigned-fix';
-import { getActiveScenarioId } from '@/lib/scenario';
 
 export const dynamic = 'force-dynamic';
 
@@ -31,7 +30,6 @@ export default async function RunPage({
 }) {
   const view: 'list' | 'map' | 'calendar' =
     searchParams.view === 'map' ? 'map' : searchParams.view === 'calendar' ? 'calendar' : 'list';
-  const scenarioId = await getActiveScenarioId();
   const supabase = getServerClient();
   // Single-by-id lookup: unscoped per task rules (runId is unguessable and carries its own scenario)
   const { data, error } = await supabase
@@ -42,6 +40,7 @@ export default async function RunPage({
 
   if (error || !data) notFound();
   const run = data as OptimizationRun;
+  const scenarioId = run.scenario_id;
 
   const isPolling = run.status === 'pending' || run.status === 'running';
 
@@ -49,14 +48,14 @@ export default async function RunPage({
   // inline next to crew names across the views. Empty string when unknown.
   const crewMeta =
     run.status === 'completed'
-      ? await loadCrewMeta(supabase, (run.crew_utilization ?? []).map((c) => c.crew_id), scenarioId ?? '')
+      ? await loadCrewMeta(supabase, (run.crew_utilization ?? []).map((c) => c.crew_id), scenarioId)
       : {};
 
   const unassignedSummary =
-    run.status === 'completed' ? await loadUnassignedSummary(supabase, run, scenarioId ?? '') : null;
+    run.status === 'completed' ? await loadUnassignedSummary(supabase, run, scenarioId) : null;
   const fixPlan =
     run.status === 'completed' && run.run_kind !== 'what_if'
-      ? await loadFixPlan(supabase, run, scenarioId ?? '')
+      ? await loadFixPlan(supabase, run, scenarioId)
       : null;
   const underUtilizedCrews = (run.crew_utilization ?? []).filter((c) => c.clock_hours > 0 && c.clock_hours < 40).length;
 
@@ -68,7 +67,7 @@ export default async function RunPage({
   const branchIdsInRun = Array.from(new Set(allRoutes.map((r) => r.branch_id)));
   const runBranches =
     run.status === 'completed' && branchIdsInRun.length > 0
-      ? await loadBranchNames(supabase, branchIdsInRun, scenarioId ?? '')
+      ? await loadBranchNames(supabase, branchIdsInRun, scenarioId)
       : [];
   const branchFilter =
     searchParams.branch && branchIdsInRun.includes(searchParams.branch) ? searchParams.branch : null;
@@ -175,9 +174,9 @@ export default async function RunPage({
 
       {run.status === 'completed' &&
         (view === 'map' ? (
-          <RunMap run={viewRun} crewMeta={crewMeta} scenarioId={scenarioId ?? ''} />
+          <RunMap run={viewRun} crewMeta={crewMeta} scenarioId={scenarioId} />
         ) : view === 'calendar' ? (
-          <RunCalendarView run={viewRun} crewMeta={crewMeta} scenarioId={scenarioId ?? ''} />
+          <RunCalendarView run={viewRun} crewMeta={crewMeta} scenarioId={scenarioId} />
         ) : (
           <CompletedRun
             run={viewRun}

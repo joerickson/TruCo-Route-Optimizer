@@ -4,7 +4,6 @@ import { getServiceClient } from '@/lib/supabase';
 import { launchOptimization } from '@/app/optimize/actions';
 import { planUnassignedFix, type FixUnassignedProp, type FixBranch, type FixCrew } from '@/lib/unassigned-fix';
 import type { OptimizationRun, CrewUtilization } from '@/lib/types';
-import { getActiveScenarioId } from '@/lib/scenario';
 
 export type ApplyFixResult = { ok: true; run_id: string } | { ok: false; error: string };
 
@@ -25,12 +24,12 @@ export async function applyUnassignedFix(runId: string): Promise<ApplyFixResult>
     const unassignedIds = run.unassigned_property_ids ?? [];
     if (unassignedIds.length === 0) return { ok: false, error: 'Nothing unassigned to fix' };
 
-    const scenarioId = await getActiveScenarioId();
+    const scenarioId = run.scenario_id;
 
     const [{ data: propRows }, { data: branchRows }, { data: crewRows }] = await Promise.all([
-      supabase.from('properties').select('id, name, est_labor_hours, preferred_branch_id, lat, lng').eq('scenario_id', scenarioId ?? '').in('id', unassignedIds),
-      supabase.from('branches').select('id, name, lat, lng').eq('scenario_id', scenarioId ?? '').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
-      supabase.from('crews').select('id, name, crew_size, home_branch_id').eq('scenario_id', scenarioId ?? '').eq('is_active', true),
+      supabase.from('properties').select('id, name, est_labor_hours, preferred_branch_id, lat, lng').eq('scenario_id', scenarioId).in('id', unassignedIds),
+      supabase.from('branches').select('id, name, lat, lng').eq('scenario_id', scenarioId).eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
+      supabase.from('crews').select('id, name, crew_size, home_branch_id').eq('scenario_id', scenarioId).eq('is_active', true),
     ]);
 
     const unassigned: FixUnassignedProp[] = (
@@ -68,14 +67,12 @@ export async function applyUnassignedFix(runId: string): Promise<ApplyFixResult>
     }
 
     for (const r of plan.relocations) {
-      const { error } = await supabase.from('crews').update({ home_branch_id: r.to_branch_id }).eq('id', r.crew_id);
+      const { error } = await supabase.from('crews').update({ home_branch_id: r.to_branch_id }).eq('id', r.crew_id).eq('scenario_id', scenarioId);
       if (error) throw new Error(`Relocate ${r.crew_name}: ${error.message}`);
     }
 
     const newCrews: Array<Record<string, unknown>> = [];
     if (plan.additions.length > 0) {
-      if (!scenarioId) throw new Error('No scenario selected');
-
       for (const a of plan.additions) {
         for (let i = 0; i < a.count; i++) {
           newCrews.push({
@@ -103,10 +100,23 @@ export async function applyUnassignedFix(runId: string): Promise<ApplyFixResult>
 
     revalidatePath('/crews');
 
-    const launched = await launchOptimization(`Re-run after fix · ${run.name}`, targetWeek);
+    const launched = await launchOptimization(`Re-run after fix · ${run.name}`, targetWeek, getRunPropertyFilter(run), scenarioId);
     if (!launched.ok) return { ok: false, error: `Crews updated, but re-run failed: ${launched.error}` };
     return { ok: true, run_id: launched.run_id };
   } catch (e) {
     return { ok: false, error: e instanceof Error ? e.message : String(e) };
   }
+}
+
+function getRunPropertyFilter(run: OptimizationRun): { anchorBranchId: string | null; radiusMiles: number | null } | undefined {
+  const filter = (
+    run.config_snapshot as {
+      property_filter?: { anchor_branch_id?: string | null; radius_miles?: number | string | null } | null;
+    } | null
+  )?.property_filter;
+  const radiusMiles = filter?.radius_miles == null ? null : Number(filter.radius_miles);
+  if (!filter?.anchor_branch_id || radiusMiles == null || !Number.isFinite(radiusMiles) || radiusMiles <= 0) {
+    return undefined;
+  }
+  return { anchorBranchId: filter.anchor_branch_id, radiusMiles };
 }

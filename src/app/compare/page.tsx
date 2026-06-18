@@ -38,8 +38,8 @@ export default async function ComparePage({ searchParams }: { searchParams: { ba
   let optimizedRun: OptimizationRun | null = null;
   if (baselineId && optimizedId) {
     const [{ data: b }, { data: o }] = await Promise.all([
-      supabase.from('optimization_runs').select('*').eq('id', baselineId).maybeSingle(),
-      supabase.from('optimization_runs').select('*').eq('id', optimizedId).maybeSingle(),
+      supabase.from('optimization_runs').select('*').eq('scenario_id', scenarioId ?? '').eq('id', baselineId).maybeSingle(),
+      supabase.from('optimization_runs').select('*').eq('scenario_id', scenarioId ?? '').eq('id', optimizedId).maybeSingle(),
     ]);
     baselineRun = (b as OptimizationRun) ?? null;
     optimizedRun = (o as OptimizationRun) ?? null;
