@@ -27,6 +27,7 @@ const REQUIRED = new Set<keyof ColumnMapping>(REQUIRED_MAPPING_FIELDS);
 
 export function ImportForm() {
   const fileRef = useRef<HTMLInputElement>(null);
+  const previewRequestRef = useRef(0);
   const [previewing, startPreview] = useTransition();
   const [importing, startImport] = useTransition();
   const [headers, setHeaders] = useState<string[] | null>(null);
@@ -39,6 +40,7 @@ export function ImportForm() {
   const canImport = headers != null && requiredMissing.length === 0;
 
   function resetMapping() {
+    previewRequestRef.current += 1;
     setHeaders(null);
     setMapping(EMPTY_MAPPING);
     setSummary(null);
@@ -53,11 +55,15 @@ export function ImportForm() {
       setError('Choose a file first.');
       return;
     }
+    const previewRequestId = (previewRequestRef.current += 1);
+    const isCurrentPreview = () =>
+      previewRequestRef.current === previewRequestId && fileRef.current?.files?.[0] === file;
     const fd = new FormData();
     fd.append('file', file);
     startPreview(async () => {
       try {
         const r = await previewColumns(fd);
+        if (!isCurrentPreview()) return;
         if (r.ok) {
           setHeaders(r.headers);
           setMapping(r.suggested);
@@ -65,6 +71,7 @@ export function ImportForm() {
           setError(r.error);
         }
       } catch (e) {
+        if (!isCurrentPreview()) return;
         setError(e instanceof Error ? e.message : 'Could not read the file');
       }
     });

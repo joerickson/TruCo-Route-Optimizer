@@ -295,6 +295,8 @@ const SUGGEST_ALIASES: Record<keyof ColumnMapping, string[]> = {
   notes: ['opportunityname', 'notes', 'description', 'comments'],
 };
 
+const UNSAFE_PARTIAL_ALIASES = new Set(['id', 'end', 'start', 'day']);
+
 function normalizeHeader(h: string): string {
   return h.toLowerCase().replace(/[^a-z0-9]/g, '');
 }
@@ -310,6 +312,7 @@ export function suggestMapping(headers: string[]): ColumnMapping {
       if (exact) { used.add(exact.raw); return exact.raw; }
     }
     for (const a of aliases) {
+      if (UNSAFE_PARTIAL_ALIASES.has(a)) continue;
       const partial = norm.find((h) => !used.has(h.raw) && (h.n.includes(a) || a.includes(h.n)));
       if (partial) { used.add(partial.raw); return partial.raw; }
     }

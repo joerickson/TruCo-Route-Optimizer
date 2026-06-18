@@ -90,4 +90,12 @@ describe('readHeaders + suggestMapping', () => {
     expect(suggested.city).toBe('Town');
     expect(suggested.est_labor_hours).toBeNull();
   });
+
+  it('does not partially match unsafe short aliases', () => {
+    const suggested = suggestMapping(['Valid', 'Provider', 'Restarted', 'Weekend', 'Holiday']);
+    expect(suggested.external_id).toBeNull();
+    expect(suggested.contract_start_date).toBeNull();
+    expect(suggested.contract_end_date).toBeNull();
+    expect(suggested.assigned_day).toBeNull();
+  });
 });
