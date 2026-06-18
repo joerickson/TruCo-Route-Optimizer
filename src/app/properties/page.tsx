@@ -9,6 +9,7 @@ import { ViewToggle } from './view-toggle';
 import { PropertiesMapLoader } from './properties-map-loader';
 import type { Property } from '@/lib/types';
 import { getPropertyMapData } from './map-data';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export const dynamic = 'force-dynamic';
 // Imports can run long on large re-uploads; raise from the default to give
@@ -22,6 +23,19 @@ export default async function PropertiesPage({
 }: {
   searchParams: { page?: string; q?: string; view?: string };
 }) {
+  const scenarioId = await getActiveScenarioId();
+
+  if (!scenarioId) {
+    return (
+      <div className="space-y-4">
+        <h1 className="text-2xl font-bold tracking-tight">Properties</h1>
+        <p className="text-sm text-muted-foreground">
+          No scenario yet. <a className="text-primary hover:underline" href="/scenarios">Create a scenario</a> to get started.
+        </p>
+      </div>
+    );
+  }
+
   const view: 'list' | 'map' = searchParams.view === 'map' ? 'map' : 'list';
   const page = Math.max(1, parseInt(searchParams.page ?? '1', 10) || 1);
   const q = (searchParams.q ?? '').trim();
@@ -31,6 +45,7 @@ export default async function PropertiesPage({
   let listQuery = supabase
     .from('properties')
     .select('*', { count: 'exact' })
+    .eq('scenario_id', scenarioId)
     .eq('is_active', true)
     .order('name')
     .range((page - 1) * PAGE_SIZE, page * PAGE_SIZE - 1);
@@ -47,7 +62,7 @@ export default async function PropertiesPage({
     listQuery,
     lastImportP,
     view === 'map'
-      ? getPropertyMapData(supabase, { q })
+      ? getPropertyMapData(supabase, { q, scenarioId })
       : Promise.resolve({ properties: [], branches: [], pendingCount: 0 }),
   ]);
 

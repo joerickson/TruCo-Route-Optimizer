@@ -3,6 +3,7 @@ import { revalidatePath } from 'next/cache';
 import { getServiceClient } from '@/lib/supabase';
 import type { Branch, Crew, Property } from '@/lib/types';
 import { withEffectiveLabor } from '@/lib/effective-labor';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 const PYTHON_SOLVER_URL = process.env.PYTHON_SOLVER_URL ?? '';
 
@@ -13,11 +14,13 @@ export async function startRecommendation(formData: FormData): Promise<Recommend
     const name =
       String(formData.get('name') ?? '').trim() || `Fleet recommendation ${new Date().toISOString().slice(0, 16)}`;
     const supabase = getServiceClient();
+    const scenarioId = await getActiveScenarioId();
+    if (!scenarioId) return { ok: false, error: 'No scenario selected' };
 
     const [{ data: branchesData }, { data: propsData }, { data: crewsData }] = await Promise.all([
-      supabase.from('branches').select('*').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
-      supabase.from('properties').select('*').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
-      supabase.from('crews').select('*').eq('is_active', true),
+      supabase.from('branches').select('*').eq('scenario_id', scenarioId ?? '').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
+      supabase.from('properties').select('*').eq('scenario_id', scenarioId ?? '').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
+      supabase.from('crews').select('*').eq('scenario_id', scenarioId ?? '').eq('is_active', true),
     ]);
     const branches = (branchesData ?? []) as Branch[];
     const properties = (propsData ?? []) as Property[];
@@ -37,6 +40,7 @@ export async function startRecommendation(formData: FormData): Promise<Recommend
       .from('crew_recommendations')
       .insert({
         name,
+        scenario_id: scenarioId,
         status: 'running',
         active_branch_ids: branches.map((b) => b.id),
         active_property_ids: properties.map((p) => p.id),

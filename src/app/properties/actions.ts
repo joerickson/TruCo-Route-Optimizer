@@ -4,6 +4,7 @@ import { getServiceClient } from '@/lib/supabase';
 import { parseAspireFile, type AspireImportRow } from '@/lib/csv-import';
 import { geocodeAddress } from '@/lib/geocoding';
 import { resolveCrewId, parseDayOfWeek } from '@/lib/schedule-import';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export interface ImportSummary {
   ok: true;
@@ -31,6 +32,9 @@ export async function importAspireCsv(formData: FormData): Promise<ImportActionR
     if (totalRows === 0) {
       return { ok: false, error: 'No rows found in file' };
     }
+
+    const scenarioId = await getActiveScenarioId();
+    if (!scenarioId) return { ok: false, error: 'No scenario selected' };
 
     const supabase = getServiceClient();
 
@@ -68,7 +72,7 @@ export async function importAspireCsv(formData: FormData): Promise<ImportActionR
     let updated = 0;
 
     if (rows.length > 0) {
-      const result = await applyRows(rows);
+      const result = await applyRows(rows, scenarioId);
       inserted = result.inserted;
       updated = result.updated;
     }
@@ -76,7 +80,7 @@ export async function importAspireCsv(formData: FormData): Promise<ImportActionR
     // Path A: if the export carried crew/day columns, resolve + apply assignments.
     const withAssignment = rows.filter((r) => r.assigned_crew_name && r.assigned_day_raw && r.external_id);
     if (withAssignment.length > 0) {
-      const { data: crewRows } = await supabase.from('crews').select('id, name').eq('is_active', true);
+      const { data: crewRows } = await supabase.from('crews').select('id, name').eq('scenario_id', scenarioId).eq('is_active', true);
       const crewsByName = new Map<string, string>();
       for (const c of (crewRows ?? []) as Array<{ id: string; name: string }>) crewsByName.set(c.name.trim().toLowerCase(), c.id);
       // Bucket by (crew_id, day) → one update per distinct assignment, not per row.
@@ -94,6 +98,7 @@ export async function importAspireCsv(formData: FormData): Promise<ImportActionR
         const { error: assignErr } = await supabase
           .from('properties')
           .update({ assigned_crew_id: crewId, assigned_day_of_week: day })
+          .eq('scenario_id', scenarioId)
           .in('external_id', externalIds);
         if (assignErr) console.error('Failed to apply schedule assignment:', assignErr.message);
       }
@@ -126,7 +131,7 @@ export async function importAspireCsv(formData: FormData): Promise<ImportActionR
 // The previous implementation did one UPDATE per matched row, which on a 564-row
 // re-import meant ~80s of round-trips and timed out. Bulk upsert collapses each
 // branch to a single PostgREST call.
-async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; updated: number }> {
+async function applyRows(rows: AspireImportRow[], scenarioId: string): Promise<{ inserted: number; updated: number }> {
   const supabase = getServiceClient();
 
   let inserted = 0;
@@ -140,7 +145,8 @@ async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; u
     const { data: existing, error: existingErr } = await supabase
       .from('properties')
       .select('external_id')
-      .in('external_id', ids);
+      .in('external_id', ids)
+      .eq('scenario_id', scenarioId);
     if (existingErr) throw new Error(existingErr.message);
 
     const existingSet = new Set((existing ?? []).map((e: { external_id: string | null }) => e.external_id));
@@ -148,8 +154,8 @@ async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; u
     updated += withExt.filter((r) => existingSet.has(r.external_id)).length;
 
     const { error } = await supabase.from('properties').upsert(
-      withExt.map((r) => ({ external_id: r.external_id, ...toDbRow(r) })),
-      { onConflict: 'external_id' },
+      withExt.map((r) => ({ external_id: r.external_id, ...toDbRow(r), scenario_id: scenarioId })),
+      { onConflict: 'scenario_id,external_id' },
     );
     if (error) throw new Error(error.message);
   }
@@ -158,7 +164,8 @@ async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; u
     // Pull existing (id, name, address) so we can match in-app. With ~600 rows this is fine.
     const { data: existing, error: fetchErr } = await supabase
       .from('properties')
-      .select('id, name, address');
+      .select('id, name, address')
+      .eq('scenario_id', scenarioId);
     if (fetchErr) throw new Error(fetchErr.message);
 
     const keyOf = (n: string, a: string) => `${n.trim().toLowerCase()}::${a.trim().toLowerCase()}`;
@@ -177,7 +184,7 @@ async function applyRows(rows: AspireImportRow[]): Promise<{ inserted: number; u
 
     if (toInsert.length > 0) {
       const { error } = await supabase.from('properties').insert(
-        toInsert.map((r) => toDbRow(r)),
+        toInsert.map((r) => ({ ...toDbRow(r), scenario_id: scenarioId })),
       );
       if (error) throw new Error(error.message);
       inserted += toInsert.length;
@@ -225,12 +232,16 @@ function serializeRaw(raw: Record<string, unknown>): Record<string, unknown> {
 }
 
 export async function geocodePending(limit = 100) {
+  const scenarioId = await getActiveScenarioId();
+  if (!scenarioId) return { ok: false, error: 'No scenario selected' };
+
   const supabase = getServiceClient();
   const { data, error } = await supabase
     .from('properties')
     .select('id, address, city, state')
     .is('lat', null)
     .eq('is_active', true)
+    .eq('scenario_id', scenarioId)
     .limit(limit);
 
   if (error) return { ok: false, error: error.message };

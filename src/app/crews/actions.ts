@@ -1,6 +1,7 @@
 'use server';
 import { revalidatePath } from 'next/cache';
 import { getServiceClient } from '@/lib/supabase';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export type CrewActionResult = { ok: true } | { ok: false; error: string };
 
@@ -59,8 +60,11 @@ export async function createCrew(formData: FormData): Promise<CrewActionResult> 
   const parsed = readFields(formData);
   if ('error' in parsed) return { ok: false, error: parsed.error };
 
+  const scenarioId = await getActiveScenarioId();
+  if (!scenarioId) return { ok: false, error: 'No scenario selected' };
+
   const supabase = getServiceClient();
-  const { error } = await supabase.from('crews').insert(parsed);
+  const { error } = await supabase.from('crews').insert({ ...parsed, scenario_id: scenarioId });
   if (error) return { ok: false, error: error.message };
 
   revalidatePath('/crews');

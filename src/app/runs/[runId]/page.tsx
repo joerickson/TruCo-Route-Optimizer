@@ -18,6 +18,7 @@ import type { RoutesMapCrew, RoutesMapDepot, RoutesMapUnassigned } from './route
 import { UnassignedBanner, UnassignedCard, UnassignedFix } from './run-unassigned';
 import { computePropertyCoverage, summarizeUnassigned, type UnassignedProp, type UnassignedSummary } from '@/lib/property-coverage';
 import { planUnassignedFix, type FixPlan, type FixUnassignedProp, type FixBranch, type FixCrew } from '@/lib/unassigned-fix';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export const dynamic = 'force-dynamic';
 
@@ -30,7 +31,9 @@ export default async function RunPage({
 }) {
   const view: 'list' | 'map' | 'calendar' =
     searchParams.view === 'map' ? 'map' : searchParams.view === 'calendar' ? 'calendar' : 'list';
+  const scenarioId = await getActiveScenarioId();
   const supabase = getServerClient();
+  // Single-by-id lookup: unscoped per task rules (runId is unguessable and carries its own scenario)
   const { data, error } = await supabase
     .from('optimization_runs')
     .select('*')
@@ -46,14 +49,14 @@ export default async function RunPage({
   // inline next to crew names across the views. Empty string when unknown.
   const crewMeta =
     run.status === 'completed'
-      ? await loadCrewMeta(supabase, (run.crew_utilization ?? []).map((c) => c.crew_id))
+      ? await loadCrewMeta(supabase, (run.crew_utilization ?? []).map((c) => c.crew_id), scenarioId ?? '')
       : {};
 
   const unassignedSummary =
-    run.status === 'completed' ? await loadUnassignedSummary(supabase, run) : null;
+    run.status === 'completed' ? await loadUnassignedSummary(supabase, run, scenarioId ?? '') : null;
   const fixPlan =
     run.status === 'completed' && run.run_kind !== 'what_if'
-      ? await loadFixPlan(supabase, run)
+      ? await loadFixPlan(supabase, run, scenarioId ?? '')
       : null;
   const underUtilizedCrews = (run.crew_utilization ?? []).filter((c) => c.clock_hours > 0 && c.clock_hours < 40).length;
 
@@ -65,7 +68,7 @@ export default async function RunPage({
   const branchIdsInRun = Array.from(new Set(allRoutes.map((r) => r.branch_id)));
   const runBranches =
     run.status === 'completed' && branchIdsInRun.length > 0
-      ? await loadBranchNames(supabase, branchIdsInRun)
+      ? await loadBranchNames(supabase, branchIdsInRun, scenarioId ?? '')
       : [];
   const branchFilter =
     searchParams.branch && branchIdsInRun.includes(searchParams.branch) ? searchParams.branch : null;
@@ -85,6 +88,10 @@ export default async function RunPage({
     };
   }
 
+  const propertyFilter =
+    (run.config_snapshot as { property_filter?: { anchor_branch_name: string; radius_miles: number } } | null)
+      ?.property_filter ?? null;
+
   return (
     <div className="space-y-6">
       {isPolling && <RunRefresher />}
@@ -99,6 +106,11 @@ export default async function RunPage({
           <p className="text-sm text-muted-foreground">
             Target week: {run.target_week_start_date} · created {new Date(run.created_at).toLocaleString()}
           </p>
+          {propertyFilter && (
+            <p className="text-sm text-muted-foreground">
+              Limited to {propertyFilter.radius_miles} mi around {propertyFilter.anchor_branch_name}
+            </p>
+          )}
         </div>
         <div className="flex items-center gap-3">
           {run.status === 'completed' && <RunViewToggle runId={run.id} current={view} branch={branchFilter} />}
@@ -163,9 +175,9 @@ export default async function RunPage({
 
       {run.status === 'completed' &&
         (view === 'map' ? (
-          <RunMap run={viewRun} crewMeta={crewMeta} />
+          <RunMap run={viewRun} crewMeta={crewMeta} scenarioId={scenarioId ?? ''} />
         ) : view === 'calendar' ? (
-          <RunCalendarView run={viewRun} crewMeta={crewMeta} />
+          <RunCalendarView run={viewRun} crewMeta={crewMeta} scenarioId={scenarioId ?? ''} />
         ) : (
           <CompletedRun
             run={viewRun}
@@ -183,12 +195,14 @@ export default async function RunPage({
 // crew size are joined here.
 async function loadCrewMeta(
   supabase: ReturnType<typeof getServerClient>,
-  crewIds: string[]
+  crewIds: string[],
+  scenarioId: string
 ): Promise<Record<string, string>> {
   if (crewIds.length === 0) return {};
   const { data: crewRows } = await supabase
     .from('crews')
     .select('id, crew_size, home_branch_id')
+    .eq('scenario_id', scenarioId)
     .in('id', crewIds);
   const crews = (crewRows ?? []) as Array<{
     id: string;
@@ -201,7 +215,7 @@ async function loadCrewMeta(
   );
   const branchName: Record<string, string> = {};
   if (branchIds.length > 0) {
-    const { data: branchRows } = await supabase.from('branches').select('id, name').in('id', branchIds);
+    const { data: branchRows } = await supabase.from('branches').select('id, name').eq('scenario_id', scenarioId).in('id', branchIds);
     for (const b of (branchRows ?? []) as Array<{ id: string; name: string }>) branchName[b.id] = b.name;
   }
 
@@ -220,10 +234,11 @@ async function loadCrewMeta(
 // Branch id -> {id, name} for the branches a run's routes touch, sorted by name (for the filter).
 async function loadBranchNames(
   supabase: ReturnType<typeof getServerClient>,
-  branchIds: string[]
+  branchIds: string[],
+  scenarioId: string
 ): Promise<{ id: string; name: string }[]> {
   if (branchIds.length === 0) return [];
-  const { data } = await supabase.from('branches').select('id, name').in('id', branchIds);
+  const { data } = await supabase.from('branches').select('id, name').eq('scenario_id', scenarioId).in('id', branchIds);
   return ((data ?? []) as Array<{ id: string; name: string }>)
     .map((b) => ({ id: b.id, name: b.name }))
     .sort((a, b) => a.name.localeCompare(b.name));
@@ -234,7 +249,8 @@ async function loadBranchNames(
 // (service_minutes/60 * crew_size) — no solver change needed.
 async function loadUnassignedSummary(
   supabase: ReturnType<typeof getServerClient>,
-  run: OptimizationRun
+  run: OptimizationRun,
+  scenarioId: string
 ): Promise<UnassignedSummary | null> {
   const unassignedIds = run.unassigned_property_ids ?? [];
   if (unassignedIds.length === 0) return null;
@@ -243,7 +259,7 @@ async function loadUnassignedSummary(
   const crewIds = Array.from(new Set(routes.map((r) => r.crew_id)));
   const crewSizeById: Record<string, number> = {};
   if (crewIds.length > 0) {
-    const { data: crewRows } = await supabase.from('crews').select('id, crew_size').in('id', crewIds);
+    const { data: crewRows } = await supabase.from('crews').select('id, crew_size').eq('scenario_id', scenarioId).in('id', crewIds);
     for (const c of (crewRows ?? []) as Array<{ id: string; crew_size: number | string | null }>) {
       crewSizeById[c.id] = Number(c.crew_size ?? 2) || 2;
     }
@@ -252,6 +268,7 @@ async function loadUnassignedSummary(
   const { data: propRows } = await supabase
     .from('properties')
     .select('id, name, city, service_type, est_labor_hours')
+    .eq('scenario_id', scenarioId)
     .in('id', unassignedIds);
   const props: UnassignedProp[] = (
     (propRows ?? []) as Array<{
@@ -275,15 +292,16 @@ async function loadUnassignedSummary(
 
 async function loadFixPlan(
   supabase: ReturnType<typeof getServerClient>,
-  run: OptimizationRun
+  run: OptimizationRun,
+  scenarioId: string
 ): Promise<FixPlan | null> {
   const unassignedIds = run.unassigned_property_ids ?? [];
   if (unassignedIds.length === 0) return null;
 
   const [{ data: propRows }, { data: branchRows }, { data: crewRows }] = await Promise.all([
-    supabase.from('properties').select('id, name, est_labor_hours, preferred_branch_id, lat, lng').in('id', unassignedIds),
-    supabase.from('branches').select('id, name, lat, lng').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
-    supabase.from('crews').select('id, name, crew_size, home_branch_id').eq('is_active', true),
+    supabase.from('properties').select('id, name, est_labor_hours, preferred_branch_id, lat, lng').eq('scenario_id', scenarioId).in('id', unassignedIds),
+    supabase.from('branches').select('id, name, lat, lng').eq('scenario_id', scenarioId).eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
+    supabase.from('crews').select('id, name, crew_size, home_branch_id').eq('scenario_id', scenarioId).eq('is_active', true),
   ]);
 
   const unassigned: FixUnassignedProp[] = (
@@ -317,7 +335,7 @@ async function loadFixPlan(
   return planUnassignedFix(unassigned, branches, crews);
 }
 
-async function RunMap({ run, crewMeta }: { run: OptimizationRun; crewMeta: Record<string, string> }) {
+async function RunMap({ run, crewMeta, scenarioId }: { run: OptimizationRun; crewMeta: Record<string, string>; scenarioId: string }) {
   const supabase = getServerClient();
   const routes: CrewDayRoute[] = run.routes_jsonb?.per_day ?? [];
   const days = Array.from(new Set(routes.map((r) => r.day_of_week))).sort((a, b) => a - b);
@@ -333,6 +351,7 @@ async function RunMap({ run, crewMeta }: { run: OptimizationRun; crewMeta: Recor
       ? supabase
           .from('branches')
           .select('id, name, lat, lng')
+          .eq('scenario_id', scenarioId)
           .in('id', branchIds)
           .not('lat', 'is', null)
           .not('lng', 'is', null)
@@ -341,6 +360,7 @@ async function RunMap({ run, crewMeta }: { run: OptimizationRun; crewMeta: Recor
       ? supabase
           .from('properties')
           .select('id, name, address, lat, lng')
+          .eq('scenario_id', scenarioId)
           .in('id', unassignedIds)
           .not('lat', 'is', null)
           .not('lng', 'is', null)
@@ -384,7 +404,7 @@ async function RunMap({ run, crewMeta }: { run: OptimizationRun; crewMeta: Recor
   );
 }
 
-async function RunCalendarView({ run, crewMeta }: { run: OptimizationRun; crewMeta: Record<string, string> }) {
+async function RunCalendarView({ run, crewMeta, scenarioId }: { run: OptimizationRun; crewMeta: Record<string, string>; scenarioId: string }) {
   const supabase = getServerClient();
   const routes: CrewDayRoute[] = run.routes_jsonb?.per_day ?? [];
   const crewUtil = run.crew_utilization ?? [];
@@ -397,6 +417,7 @@ async function RunCalendarView({ run, crewMeta }: { run: OptimizationRun; crewMe
       .select(
         'id, works_monday, works_tuesday, works_wednesday, works_thursday, works_friday, max_clock_hours_per_day'
       )
+      .eq('scenario_id', scenarioId)
       .in('id', crewIds);
     for (const c of (crewRows ?? []) as Array<{
       id: string;

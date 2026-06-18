@@ -8,6 +8,7 @@ import { UploadScheduleButton } from './upload-schedule';
 import { FleetSummary } from './fleet-summary';
 import { CrewDeltas } from './crew-deltas';
 import { PropertyChanges } from './property-changes';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,11 +21,12 @@ function nextMonday(): string {
 }
 
 export default async function ComparePage({ searchParams }: { searchParams: { baseline?: string; optimized?: string } }) {
+  const scenarioId = await getActiveScenarioId();
   const supabase = getServerClient();
 
   const [{ data: baselineRows }, { data: optimizedRows }] = await Promise.all([
-    supabase.from('optimization_runs').select('id, name, created_at, status').eq('run_kind', 'baseline').eq('status', 'completed').order('created_at', { ascending: false }).limit(20),
-    supabase.from('optimization_runs').select('id, name, created_at, status').eq('run_kind', 'optimized').eq('status', 'completed').order('created_at', { ascending: false }).limit(20),
+    supabase.from('optimization_runs').select('id, name, created_at, status').eq('scenario_id', scenarioId ?? '').eq('run_kind', 'baseline').eq('status', 'completed').order('created_at', { ascending: false }).limit(20),
+    supabase.from('optimization_runs').select('id, name, created_at, status').eq('scenario_id', scenarioId ?? '').eq('run_kind', 'optimized').eq('status', 'completed').order('created_at', { ascending: false }).limit(20),
   ]);
   const baselines = (baselineRows ?? []) as Array<{ id: string; name: string; created_at: string }>;
   const optimized = (optimizedRows ?? []) as Array<{ id: string; name: string; created_at: string }>;

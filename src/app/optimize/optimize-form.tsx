@@ -6,7 +6,15 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { startOptimization } from './actions';
 
-export function OptimizeForm({ defaultWeek, ready }: { defaultWeek: string; ready: boolean }) {
+export function OptimizeForm({
+  defaultWeek,
+  ready,
+  branches,
+}: {
+  defaultWeek: string;
+  ready: boolean;
+  branches: { id: string; name: string }[];
+}) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
@@ -33,6 +41,26 @@ export function OptimizeForm({ defaultWeek, ready }: { defaultWeek: string; read
       <div>
         <Label htmlFor="target_week_start_date">Week starting (Monday)</Label>
         <Input id="target_week_start_date" name="target_week_start_date" type="date" defaultValue={defaultWeek} required />
+      </div>
+      <div>
+        <Label htmlFor="anchor_branch_id">Limit to area around (optional)</Label>
+        <select
+          id="anchor_branch_id"
+          name="anchor_branch_id"
+          className="h-10 w-full rounded-md border bg-background px-3 text-sm"
+          defaultValue=""
+        >
+          <option value="">All properties in scenario</option>
+          {branches.map((b) => (
+            <option key={b.id} value={b.id}>
+              {b.name}
+            </option>
+          ))}
+        </select>
+      </div>
+      <div>
+        <Label htmlFor="radius_miles">Radius (miles)</Label>
+        <Input id="radius_miles" name="radius_miles" type="number" min="1" placeholder="25" />
       </div>
       <div className="md:col-span-3 flex items-center gap-3">
         <Button type="submit" disabled={!ready || pending}>

@@ -4,14 +4,16 @@ import { getServerClient } from '@/lib/supabase';
 import type { Crew, Branch } from '@/lib/types';
 import { CrewRow } from './crew-row';
 import { AddCrewButton } from './add-crew-button';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export const dynamic = 'force-dynamic';
 
 export default async function CrewsPage() {
+  const scenarioId = await getActiveScenarioId();
   const supabase = getServerClient();
   const [{ data: crewsData }, { data: branchesData }] = await Promise.all([
-    supabase.from('crews').select('*').order('name'),
-    supabase.from('branches').select('id, name, is_active').order('name'),
+    supabase.from('crews').select('*').eq('scenario_id', scenarioId ?? '').order('name'),
+    supabase.from('branches').select('id, name, is_active').eq('scenario_id', scenarioId ?? '').order('name'),
   ]);
 
   const crews = (crewsData ?? []) as Crew[];

@@ -2,6 +2,7 @@
 import { revalidatePath } from 'next/cache';
 import { getServiceClient } from '@/lib/supabase';
 import { geocodeAddress } from '@/lib/geocoding';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export type BranchActionResult =
   | { ok: true; warning?: string }
@@ -50,6 +51,9 @@ export async function createBranch(formData: FormData): Promise<BranchActionResu
   const parsed = readFields(formData);
   if ('error' in parsed) return { ok: false, error: parsed.error };
 
+  const scenarioId = await getActiveScenarioId();
+  if (!scenarioId) return { ok: false, error: 'No scenario selected' };
+
   const fields = parsed;
   const geo = await tryGeocode(fields);
   const supabase = getServiceClient();
@@ -63,6 +67,7 @@ export async function createBranch(formData: FormData): Promise<BranchActionResu
     is_active: fields.is_active,
     lat: 'failed' in geo ? null : geo.lat,
     lng: 'failed' in geo ? null : geo.lng,
+    scenario_id: scenarioId,
   };
 
   const { error } = await supabase.from('branches').insert(insertRow);

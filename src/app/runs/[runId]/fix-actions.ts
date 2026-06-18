@@ -4,6 +4,7 @@ import { getServiceClient } from '@/lib/supabase';
 import { launchOptimization } from '@/app/optimize/actions';
 import { planUnassignedFix, type FixUnassignedProp, type FixBranch, type FixCrew } from '@/lib/unassigned-fix';
 import type { OptimizationRun, CrewUtilization } from '@/lib/types';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export type ApplyFixResult = { ok: true; run_id: string } | { ok: false; error: string };
 
@@ -24,10 +25,12 @@ export async function applyUnassignedFix(runId: string): Promise<ApplyFixResult>
     const unassignedIds = run.unassigned_property_ids ?? [];
     if (unassignedIds.length === 0) return { ok: false, error: 'Nothing unassigned to fix' };
 
+    const scenarioId = await getActiveScenarioId();
+
     const [{ data: propRows }, { data: branchRows }, { data: crewRows }] = await Promise.all([
-      supabase.from('properties').select('id, name, est_labor_hours, preferred_branch_id, lat, lng').in('id', unassignedIds),
-      supabase.from('branches').select('id, name, lat, lng').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
-      supabase.from('crews').select('id, name, crew_size, home_branch_id').eq('is_active', true),
+      supabase.from('properties').select('id, name, est_labor_hours, preferred_branch_id, lat, lng').eq('scenario_id', scenarioId ?? '').in('id', unassignedIds),
+      supabase.from('branches').select('id, name, lat, lng').eq('scenario_id', scenarioId ?? '').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
+      supabase.from('crews').select('id, name, crew_size, home_branch_id').eq('scenario_id', scenarioId ?? '').eq('is_active', true),
     ]);
 
     const unassigned: FixUnassignedProp[] = (
@@ -70,22 +73,27 @@ export async function applyUnassignedFix(runId: string): Promise<ApplyFixResult>
     }
 
     const newCrews: Array<Record<string, unknown>> = [];
-    for (const a of plan.additions) {
-      for (let i = 0; i < a.count; i++) {
-        newCrews.push({
-          name: `${a.branch_name} crew (added by fix)`,
-          crew_size: a.size,
-          home_branch_id: a.branch_id,
-          max_clock_hours_per_day: REC_MAX_HOURS_PER_DAY,
-          works_monday: true,
-          works_tuesday: true,
-          works_wednesday: true,
-          works_thursday: true,
-          works_friday: true,
-          works_saturday: false,
-          works_sunday: false,
-          is_active: true,
-        });
+    if (plan.additions.length > 0) {
+      if (!scenarioId) throw new Error('No scenario selected');
+
+      for (const a of plan.additions) {
+        for (let i = 0; i < a.count; i++) {
+          newCrews.push({
+            name: `${a.branch_name} crew (added by fix)`,
+            crew_size: a.size,
+            home_branch_id: a.branch_id,
+            max_clock_hours_per_day: REC_MAX_HOURS_PER_DAY,
+            works_monday: true,
+            works_tuesday: true,
+            works_wednesday: true,
+            works_thursday: true,
+            works_friday: true,
+            works_saturday: false,
+            works_sunday: false,
+            is_active: true,
+            scenario_id: scenarioId,
+          });
+        }
       }
     }
     if (newCrews.length > 0) {

@@ -2,6 +2,8 @@
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
+import { ScenarioSwitcher } from '@/components/scenario-switcher';
+import type { Scenario } from '@/lib/types';
 
 const NAV = [
   { href: '/', label: 'Overview' },
@@ -14,7 +16,13 @@ const NAV = [
   { href: '/recommend', label: 'Recommend' },
 ];
 
-export function TopNav() {
+export function TopNav({
+  scenarios,
+  activeScenarioId,
+}: {
+  scenarios: Pick<Scenario, 'id' | 'name'>[];
+  activeScenarioId: string | null;
+}) {
   const pathname = usePathname();
   return (
     <header className="sticky top-0 z-40 border-b bg-background/95 backdrop-blur">
@@ -39,6 +47,7 @@ export function TopNav() {
             );
           })}
         </nav>
+        <ScenarioSwitcher scenarios={scenarios} activeId={activeScenarioId} />
       </div>
     </header>
   );

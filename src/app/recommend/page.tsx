@@ -5,6 +5,7 @@ import type { CrewRecommendation, RecommendationResult } from '@/lib/types';
 import { RecommendRefresher } from './recommend-refresher';
 import { RecommendForm } from './recommend-form';
 import { RecommendTable } from './recommend-table';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,9 +15,11 @@ function isDeltaShape(r: RecommendationResult | null | undefined): boolean {
 
 export default async function RecommendPage() {
   const supabase = getServerClient();
+  const scenarioId = await getActiveScenarioId();
   const { data } = await supabase
     .from('crew_recommendations')
     .select('*')
+    .eq('scenario_id', scenarioId ?? '')
     .order('created_at', { ascending: false })
     .limit(1)
     .maybeSingle();
