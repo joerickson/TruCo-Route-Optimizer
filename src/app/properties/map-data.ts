@@ -7,13 +7,15 @@ import type { MapBranch, MapProperty } from './properties-map';
 // still awaiting geocode. Shared by the Properties map view and the Overview map.
 export async function getPropertyMapData(
   supabase: SupabaseClient,
-  opts: { q?: string } = {}
+  opts: { q?: string; scenarioId?: string } = {}
 ): Promise<{ properties: MapProperty[]; branches: MapBranch[]; pendingCount: number }> {
   const q = (opts.q ?? '').trim();
+  const scenarioId = opts.scenarioId ?? '';
 
   let propsQuery = supabase
     .from('properties')
     .select('id, name, address, city, lat, lng, service_type, est_labor_hours, contract_start_date, contract_end_date')
+    .eq('scenario_id', scenarioId)
     .eq('is_active', true)
     .not('lat', 'is', null)
     .not('lng', 'is', null)
@@ -23,11 +25,13 @@ export async function getPropertyMapData(
   const branchesQuery = supabase
     .from('branches')
     .select('id, name, address, city, lat, lng')
+    .eq('scenario_id', scenarioId)
     .eq('is_active', true);
 
   const pendingQuery = supabase
     .from('properties')
     .select('*', { count: 'exact', head: true })
+    .eq('scenario_id', scenarioId)
     .eq('is_active', true)
     .is('lat', null);
 

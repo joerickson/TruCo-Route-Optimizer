@@ -4,6 +4,7 @@ import { getServiceClient } from '@/lib/supabase';
 import { parseScheduleFile, parseDayOfWeek, resolveCrewId } from '@/lib/schedule-import';
 import type { Branch, Crew, Property } from '@/lib/types';
 import { withEffectiveLabor } from '@/lib/effective-labor';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 const PYTHON_SOLVER_URL = process.env.PYTHON_SOLVER_URL ?? '';
 
@@ -28,9 +29,10 @@ export async function uploadAndScoreSchedule(formData: FormData): Promise<Schedu
     if (rows.length === 0) return { ok: false, error: 'No usable schedule rows found in file' };
 
     const supabase = getServiceClient();
+    const scenarioId = await getActiveScenarioId();
 
     // Build crew-name -> id map (case/space-insensitive).
-    const { data: crewRows } = await supabase.from('crews').select('id, name').eq('is_active', true);
+    const { data: crewRows } = await supabase.from('crews').select('id, name').eq('scenario_id', scenarioId ?? '').eq('is_active', true);
     const crewsByName = new Map<string, string>();
     for (const c of (crewRows ?? []) as Array<{ id: string; name: string }>) {
       crewsByName.set(c.name.trim().toLowerCase(), c.id);
@@ -78,9 +80,9 @@ export async function uploadAndScoreSchedule(formData: FormData): Promise<Schedu
 
     // Gather the same inputs the optimizer uses.
     const [{ data: crewsData }, { data: branchesData }, { data: propsData }] = await Promise.all([
-      supabase.from('crews').select('*').eq('is_active', true),
-      supabase.from('branches').select('*').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
-      supabase.from('properties').select('*').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
+      supabase.from('crews').select('*').eq('scenario_id', scenarioId ?? '').eq('is_active', true),
+      supabase.from('branches').select('*').eq('scenario_id', scenarioId ?? '').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
+      supabase.from('properties').select('*').eq('scenario_id', scenarioId ?? '').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
     ]);
     const crews = (crewsData ?? []) as Crew[];
     const branches = (branchesData ?? []) as Branch[];

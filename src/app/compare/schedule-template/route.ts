@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import { getServerClient } from '@/lib/supabase';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export const dynamic = 'force-dynamic';
 
@@ -8,10 +9,11 @@ export const dynamic = 'force-dynamic';
 // it guarantees the headers (External ID / Crew / Day) and external_id matching are correct. The
 // "Reference" sheet lists the valid crew names to enter and the accepted Day formats.
 export async function GET() {
+  const scenarioId = await getActiveScenarioId();
   const supabase = getServerClient();
   const [{ data: props }, { data: crews }] = await Promise.all([
-    supabase.from('properties').select('external_id, name, city, service_type').eq('is_active', true).order('name'),
-    supabase.from('crews').select('name').eq('is_active', true).order('name'),
+    supabase.from('properties').select('external_id, name, city, service_type').eq('scenario_id', scenarioId ?? '').eq('is_active', true).order('name'),
+    supabase.from('crews').select('name').eq('scenario_id', scenarioId ?? '').eq('is_active', true).order('name'),
   ]);
 
   const scheduleRows = (props ?? []).map((p) => ({

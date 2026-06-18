@@ -5,6 +5,7 @@ import { getServerClient } from '@/lib/supabase';
 import type { OptimizationRun, Property, Crew } from '@/lib/types';
 import { formatHours } from '@/lib/utils';
 import { effectiveLaborHours } from '@/lib/effective-labor';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export const dynamic = 'force-dynamic';
 
@@ -15,13 +16,15 @@ export const dynamic = 'force-dynamic';
 const DEMAND_WEIGHT: Record<string, number> = { weekly: 1, biweekly: 0.5, monthly: 1 / 4.33 };
 
 export default async function CapacityPage() {
+  const scenarioId = await getActiveScenarioId();
   const supabase = getServerClient();
   const [{ data: propsData }, { data: crewsData }, { data: runData }] = await Promise.all([
-    supabase.from('properties').select('*').eq('is_active', true),
-    supabase.from('crews').select('*').eq('is_active', true),
+    supabase.from('properties').select('*').eq('scenario_id', scenarioId ?? '').eq('is_active', true),
+    supabase.from('crews').select('*').eq('scenario_id', scenarioId ?? '').eq('is_active', true),
     supabase
       .from('optimization_runs')
       .select('*')
+      .eq('scenario_id', scenarioId ?? '')
       .eq('status', 'completed')
       .order('created_at', { ascending: false })
       .limit(1)

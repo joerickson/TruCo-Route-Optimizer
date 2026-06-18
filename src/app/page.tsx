@@ -4,23 +4,25 @@ import { getServerClient } from '@/lib/supabase';
 import { Button } from '@/components/ui/button';
 import { getPropertyMapData } from './properties/map-data';
 import { PropertiesMapLoader } from './properties/properties-map-loader';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export const dynamic = 'force-dynamic';
 
-async function getCounts() {
+async function getCounts(scenarioId: string) {
   const supabase = getServerClient();
   const [{ count: propCount }, { count: crewCount }, { count: branchCount }, { data: latestRun }, mapData] =
     await Promise.all([
-      supabase.from('properties').select('*', { count: 'exact', head: true }).eq('is_active', true),
-      supabase.from('crews').select('*', { count: 'exact', head: true }).eq('is_active', true),
-      supabase.from('branches').select('*', { count: 'exact', head: true }).eq('is_active', true),
+      supabase.from('properties').select('*', { count: 'exact', head: true }).eq('scenario_id', scenarioId).eq('is_active', true),
+      supabase.from('crews').select('*', { count: 'exact', head: true }).eq('scenario_id', scenarioId).eq('is_active', true),
+      supabase.from('branches').select('*', { count: 'exact', head: true }).eq('scenario_id', scenarioId).eq('is_active', true),
       supabase
         .from('optimization_runs')
         .select('id, name, status, created_at, capacity_recommendation')
+        .eq('scenario_id', scenarioId)
         .order('created_at', { ascending: false })
         .limit(1)
         .maybeSingle(),
-      getPropertyMapData(supabase),
+      getPropertyMapData(supabase, { scenarioId }),
     ]);
 
   return {
@@ -33,10 +35,23 @@ async function getCounts() {
 }
 
 export default async function HomePage() {
+  const scenarioId = await getActiveScenarioId();
+
+  if (!scenarioId) {
+    return (
+      <div className="space-y-4">
+        <h1 className="text-2xl font-bold tracking-tight">TruCo Route Optimizer</h1>
+        <p className="text-sm text-muted-foreground">
+          No scenario yet. <a className="text-primary hover:underline" href="/scenarios">Create a scenario</a> to get started.
+        </p>
+      </div>
+    );
+  }
+
   let data: Awaited<ReturnType<typeof getCounts>> | null = null;
   let error: string | null = null;
   try {
-    data = await getCounts();
+    data = await getCounts(scenarioId);
   } catch (e) {
     error = e instanceof Error ? e.message : 'Could not connect to Supabase';
   }

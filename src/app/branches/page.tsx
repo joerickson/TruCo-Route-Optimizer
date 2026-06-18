@@ -4,14 +4,16 @@ import { getServerClient } from '@/lib/supabase';
 import type { Branch } from '@/lib/types';
 import { AddBranchButton } from './add-branch-button';
 import { BranchRow } from './branch-row';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export const dynamic = 'force-dynamic';
 
 export default async function BranchesPage() {
+  const scenarioId = await getActiveScenarioId();
   const supabase = getServerClient();
   const [{ data: branchesData }, { data: crewsData }] = await Promise.all([
-    supabase.from('branches').select('*').order('name'),
-    supabase.from('crews').select('home_branch_id').eq('is_active', true),
+    supabase.from('branches').select('*').eq('scenario_id', scenarioId ?? '').order('name'),
+    supabase.from('crews').select('home_branch_id').eq('scenario_id', scenarioId ?? '').eq('is_active', true),
   ]);
 
   const branches = (branchesData ?? []) as Branch[];

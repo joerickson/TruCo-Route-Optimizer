@@ -1,5 +1,6 @@
 import * as XLSX from 'xlsx';
 import { getServerClient } from '@/lib/supabase';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export const dynamic = 'force-dynamic';
 
@@ -7,10 +8,12 @@ export const dynamic = 'force-dynamic';
 // reference columns already populated and a blank actual_hours_per_week to fill in. Round-tripping
 // this file guarantees the headers and external_id matching are correct.
 export async function GET() {
+  const scenarioId = await getActiveScenarioId();
   const supabase = getServerClient();
   const { data } = await supabase
     .from('properties')
     .select('external_id, name, city, service_type, est_labor_hours, actual_hours_per_week')
+    .eq('scenario_id', scenarioId ?? '')
     .eq('is_active', true)
     .order('name');
 

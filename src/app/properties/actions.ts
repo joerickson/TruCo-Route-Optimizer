@@ -80,7 +80,7 @@ export async function importAspireCsv(formData: FormData): Promise<ImportActionR
     // Path A: if the export carried crew/day columns, resolve + apply assignments.
     const withAssignment = rows.filter((r) => r.assigned_crew_name && r.assigned_day_raw && r.external_id);
     if (withAssignment.length > 0) {
-      const { data: crewRows } = await supabase.from('crews').select('id, name').eq('is_active', true);
+      const { data: crewRows } = await supabase.from('crews').select('id, name').eq('scenario_id', scenarioId).eq('is_active', true);
       const crewsByName = new Map<string, string>();
       for (const c of (crewRows ?? []) as Array<{ id: string; name: string }>) crewsByName.set(c.name.trim().toLowerCase(), c.id);
       // Bucket by (crew_id, day) → one update per distinct assignment, not per row.

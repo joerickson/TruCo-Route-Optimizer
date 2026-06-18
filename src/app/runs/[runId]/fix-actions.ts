@@ -25,10 +25,12 @@ export async function applyUnassignedFix(runId: string): Promise<ApplyFixResult>
     const unassignedIds = run.unassigned_property_ids ?? [];
     if (unassignedIds.length === 0) return { ok: false, error: 'Nothing unassigned to fix' };
 
+    const scenarioId = await getActiveScenarioId();
+
     const [{ data: propRows }, { data: branchRows }, { data: crewRows }] = await Promise.all([
-      supabase.from('properties').select('id, name, est_labor_hours, preferred_branch_id, lat, lng').in('id', unassignedIds),
-      supabase.from('branches').select('id, name, lat, lng').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
-      supabase.from('crews').select('id, name, crew_size, home_branch_id').eq('is_active', true),
+      supabase.from('properties').select('id, name, est_labor_hours, preferred_branch_id, lat, lng').eq('scenario_id', scenarioId ?? '').in('id', unassignedIds),
+      supabase.from('branches').select('id, name, lat, lng').eq('scenario_id', scenarioId ?? '').eq('is_active', true).not('lat', 'is', null).not('lng', 'is', null),
+      supabase.from('crews').select('id, name, crew_size, home_branch_id').eq('scenario_id', scenarioId ?? '').eq('is_active', true),
     ]);
 
     const unassigned: FixUnassignedProp[] = (
@@ -72,7 +74,6 @@ export async function applyUnassignedFix(runId: string): Promise<ApplyFixResult>
 
     const newCrews: Array<Record<string, unknown>> = [];
     if (plan.additions.length > 0) {
-      const scenarioId = await getActiveScenarioId();
       if (!scenarioId) throw new Error('No scenario selected');
 
       for (const a of plan.additions) {

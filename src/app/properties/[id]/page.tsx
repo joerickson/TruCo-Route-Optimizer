@@ -8,6 +8,7 @@ import { PropertyEditForm } from './property-edit-form';
 import { PropertyDetailMapLoader } from './property-detail-map-loader';
 import { StreetView } from './street-view';
 import { GeocodingStatus } from './geocoding-status';
+import { getActiveScenarioId } from '@/lib/scenario';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,8 +21,10 @@ interface BranchRow {
 }
 
 export default async function PropertyDetailPage({ params }: { params: { id: string } }) {
+  const scenarioId = await getActiveScenarioId();
   const supabase = getServiceClient();
 
+  // Single-by-id lookup: unscoped per task rules
   const { data, error } = await supabase.from('properties').select('*').eq('id', params.id).maybeSingle();
 
   if (error || !data) {
@@ -46,10 +49,11 @@ export default async function PropertyDetailPage({ params }: { params: { id: str
   const property = data as Property;
 
   const [{ data: branchesData }, { data: prev }, { data: next }] = await Promise.all([
-    supabase.from('branches').select('id, name, address, lat, lng').eq('is_active', true),
+    supabase.from('branches').select('id, name, address, lat, lng').eq('scenario_id', scenarioId ?? '').eq('is_active', true),
     supabase
       .from('properties')
       .select('id, name')
+      .eq('scenario_id', scenarioId ?? '')
       .eq('is_active', true)
       .lt('name', property.name)
       .order('name', { ascending: false })
@@ -58,6 +62,7 @@ export default async function PropertyDetailPage({ params }: { params: { id: str
     supabase
       .from('properties')
       .select('id, name')
+      .eq('scenario_id', scenarioId ?? '')
       .eq('is_active', true)
       .gt('name', property.name)
       .order('name', { ascending: true })
