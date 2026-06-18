@@ -1,7 +1,15 @@
 'use server';
 import { revalidatePath } from 'next/cache';
 import { getServiceClient } from '@/lib/supabase';
-import { parseAspireFile, type AspireImportRow } from '@/lib/csv-import';
+import {
+  parseAspireFile,
+  readHeaders,
+  suggestMapping,
+  EMPTY_MAPPING,
+  DEFAULT_MAPPING,
+  type AspireImportRow,
+  type ColumnMapping,
+} from '@/lib/csv-import';
 import { geocodeAddress } from '@/lib/geocoding';
 import { resolveCrewId, parseDayOfWeek } from '@/lib/schedule-import';
 import { getActiveScenarioId } from '@/lib/scenario';
@@ -16,6 +24,43 @@ export interface ImportSummary {
 
 export type ImportActionResult = ImportSummary | { ok: false; error: string };
 
+export type PreviewColumnsResult =
+  | { ok: true; headers: string[]; suggested: ColumnMapping }
+  | { ok: false; error: string };
+
+// Step 1 of import: read the uploaded file's header row so the UI can offer a
+// column-mapping step. Does not write anything.
+export async function previewColumns(formData: FormData): Promise<PreviewColumnsResult> {
+  try {
+    const file = formData.get('file');
+    if (!(file instanceof File) || file.size === 0) {
+      return { ok: false, error: 'No file uploaded' };
+    }
+    const buffer = await file.arrayBuffer();
+    const headers = readHeaders(file.name, buffer);
+    if (headers.length === 0) {
+      return { ok: false, error: 'Could not read any column headers from the first row of the file' };
+    }
+    return { ok: true, headers, suggested: suggestMapping(headers) };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : 'Could not read file' };
+  }
+}
+
+// Build a full ColumnMapping from the form's `mapping` JSON field, layering it over
+// an all-null base so unmapped optional fields stay null. Falls back to the Aspire
+// default mapping when no mapping is supplied (e.g. legacy callers).
+function mappingFromForm(formData: FormData): ColumnMapping {
+  const raw = formData.get('mapping');
+  if (typeof raw !== 'string' || !raw.trim()) return DEFAULT_MAPPING;
+  try {
+    const parsed = JSON.parse(raw) as Partial<ColumnMapping>;
+    return { ...EMPTY_MAPPING, ...parsed };
+  } catch {
+    return DEFAULT_MAPPING;
+  }
+}
+
 export async function importAspireCsv(formData: FormData): Promise<ImportActionResult> {
   // Wrap everything: any throw from the parser, Supabase, or applyRows should come back
   // as a structured error rather than crashing the server function (which surfaces as
@@ -26,7 +71,8 @@ export async function importAspireCsv(formData: FormData): Promise<ImportActionR
       return { ok: false, error: 'No file uploaded' };
     }
     const buffer = await file.arrayBuffer();
-    const { rows, skipped } = parseAspireFile(file.name, buffer);
+    const mapping = mappingFromForm(formData);
+    const { rows, skipped } = parseAspireFile(file.name, buffer, mapping);
     const totalRows = rows.length + skipped.length;
 
     if (totalRows === 0) {
