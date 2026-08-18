@@ -21,6 +21,8 @@ const FIELDS: { key: keyof ColumnMapping; label: string }[] = [
   { key: 'assigned_crew', label: 'Crew' },
   { key: 'assigned_day', label: 'Service day' },
   { key: 'notes', label: 'Notes' },
+  { key: 'tier', label: 'Tier (snow)' },
+  { key: 'sidewalk', label: 'Sidewalk (snow)' },
 ];
 
 const REQUIRED = new Set<keyof ColumnMapping>(REQUIRED_MAPPING_FIELDS);
