@@ -6,6 +6,7 @@ import { Badge } from '@/components/ui/badge';
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table';
 import { snowCapacity, type SnowProperty, type SnowBranch } from '@/lib/snow-capacity';
 import { SnowAssumptions, type TierRow } from './snow-assumptions';
+import { SnowMapLoader } from './snow-map-loader';
 
 export const dynamic = 'force-dynamic';
 
@@ -40,7 +41,7 @@ export default async function SnowPage() {
       supabase.from('snow_tier_rates').select('tier, plow_hours').eq('scenario_id', scenarioId),
       supabase
         .from('properties')
-        .select('id, name, lat, lng, tier, has_sidewalk')
+        .select('id, name, address, city, lat, lng, tier, has_sidewalk')
         .eq('scenario_id', scenarioId)
         .eq('is_active', true)
         .not('lat', 'is', null)
@@ -109,6 +110,17 @@ export default async function SnowPage() {
   const result = snowCapacity({ properties, branches, tierPlowHours, sidewalkHours, windowHours });
 
   const sidewalkCount = properties.filter((p) => p.has_sidewalk).length;
+
+  const mapProperties = ((propData ?? []) as Array<Record<string, unknown>>).map((p) => ({
+    id: String(p.id),
+    name: String(p.name ?? ''),
+    address: String(p.address ?? ''),
+    city: String(p.city ?? ''),
+    lat: Number(p.lat),
+    lng: Number(p.lng),
+    tier: p.tier == null ? null : String(p.tier),
+    has_sidewalk: Boolean(p.has_sidewalk),
+  }));
 
   return (
     <div className="space-y-6">
@@ -212,6 +224,8 @@ export default async function SnowPage() {
           </div>
         </CardContent>
       </Card>
+
+      <SnowMapLoader properties={mapProperties} branches={branches} />
     </div>
   );
 }
