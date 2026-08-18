@@ -14,6 +14,8 @@ export interface AspireImportRow {
   contract_start_date: string | null;
   contract_end_date: string | null;
   notes: string | null;
+  tier: string | null;
+  has_sidewalk: boolean;
   assigned_crew_name: string | null;
   assigned_day_raw: string | null;
 }
@@ -61,6 +63,9 @@ export interface ColumnMapping {
   assigned_crew: string | null;
   assigned_day: string | null;
   notes: string | null;
+  // Snow: tier level and a sidewalk flag (truthy value → has sidewalks).
+  tier: string | null;
+  sidewalk: string | null;
 }
 
 export const REQUIRED_MAPPING_FIELDS: ReadonlyArray<keyof ColumnMapping> = ['name', 'address', 'city'];
@@ -80,6 +85,8 @@ export const DEFAULT_MAPPING: ColumnMapping = {
   assigned_crew: 'Crew',
   assigned_day: 'Service Day',
   notes: 'Opportunity Name',
+  tier: null,
+  sidewalk: null,
 };
 
 // An all-null mapping — the base a custom client mapping is layered onto, so an
@@ -97,7 +104,17 @@ export const EMPTY_MAPPING: ColumnMapping = {
   assigned_crew: null,
   assigned_day: null,
   notes: null,
+  tier: null,
+  sidewalk: null,
 };
+
+// Parse a sidewalk-flag cell to a boolean. Empty or an explicit negative → false; any
+// other non-empty value (yes/y/true/1/x/…) → true. Most properties have no sidewalks.
+function parseSidewalk(v: string): boolean {
+  const s = v.trim().toLowerCase();
+  if (!s) return false;
+  return !['no', 'n', 'false', '0', 'none'].includes(s);
+}
 
 type DateParseResult = { ok: true; value: string | null } | { ok: false; reason: string };
 
@@ -172,6 +189,9 @@ function mapRow(
   const assignedCrew = mapped(raw, m.assigned_crew) || null;
   const assignedDay = mapped(raw, m.assigned_day) || null;
 
+  const tier = mapped(raw, m.tier) || null;
+  const hasSidewalk = parseSidewalk(mapped(raw, m.sidewalk));
+
   return {
     external_id: externalId,
     name,
@@ -183,6 +203,8 @@ function mapRow(
     contract_start_date: startDate && startDate.ok ? startDate.value : null,
     contract_end_date: endDate && endDate.ok ? endDate.value : null,
     notes,
+    tier,
+    has_sidewalk: hasSidewalk,
     assigned_crew_name: assignedCrew,
     assigned_day_raw: assignedDay,
   };
@@ -293,6 +315,8 @@ const SUGGEST_ALIASES: Record<keyof ColumnMapping, string[]> = {
   assigned_crew: ['assignedcrew', 'crew', 'route'],
   assigned_day: ['serviceday', 'dayofweek', 'day'],
   notes: ['opportunityname', 'notes', 'description', 'comments'],
+  tier: ['tier', 'tierlevel', 'priority', 'level', 'servicetier'],
+  sidewalk: ['sidewalk', 'sidewalks', 'haswalks', 'walks', 'walkways'],
 };
 
 function normalizeHeader(h: string): string {

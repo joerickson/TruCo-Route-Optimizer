@@ -3,6 +3,10 @@
 
 export type ServiceType = 'weekly' | 'biweekly' | 'monthly';
 
+// Maintenance = recurring weekly/biweekly/monthly work (the default model).
+// Snow = as-needed, storm-triggered work sized by a per-event design window.
+export type ScenarioKind = 'maintenance' | 'snow';
+
 export type RunStatus = 'pending' | 'running' | 'completed' | 'failed';
 
 export type CapacityRecommendation =
@@ -17,7 +21,18 @@ export interface Scenario {
   name: string;
   description: string | null;
   is_default: boolean;
+  kind: ScenarioKind;
+  // Snow bid parameters (only meaningful when kind === 'snow').
+  snow_window_hours: number;
+  snow_sidewalk_hours: number;
   created_at: string;
+}
+
+// Editable plow hours for a tier within a snow scenario.
+export interface SnowTierRate {
+  scenario_id: string;
+  tier: string;
+  plow_hours: number;
 }
 
 export interface Branch {
@@ -70,6 +85,9 @@ export interface Property {
   service_type: ServiceType;
   est_labor_hours: number;
   actual_hours_per_week: number | null;
+  // Snow: tier drives plow time (via snow_tier_rates); has_sidewalk opts into the sidewalk fleet.
+  tier: string | null;
+  has_sidewalk: boolean;
   contract_start_date: string | null;
   contract_end_date: string | null;
   preferred_day_of_week: number | null;

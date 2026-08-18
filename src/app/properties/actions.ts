@@ -284,6 +284,8 @@ function toDbRow(r: AspireImportRow) {
     contract_start_date: r.contract_start_date,
     contract_end_date: r.contract_end_date,
     notes: r.notes,
+    tier: r.tier,
+    has_sidewalk: r.has_sidewalk,
   };
 }
 

@@ -6,6 +6,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Textarea } from '@/components/ui/textarea';
 import { Badge } from '@/components/ui/badge';
+import { Switch } from '@/components/ui/switch';
 import type { Property, ServiceType } from '@/lib/types';
 import { laborVariance } from '@/lib/effective-labor';
 import { updateProperty } from './actions';
@@ -21,6 +22,7 @@ export function PropertyEditForm({ property }: { property: Property }) {
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
   const [warning, setWarning] = useState<string | null>(null);
+  const [hasSidewalk, setHasSidewalk] = useState<boolean>(property.has_sidewalk);
   const formRef = useRef<HTMLFormElement>(null);
   const variance = property.actual_hours_per_week != null ? laborVariance(property) : null;
 
@@ -87,6 +89,8 @@ export function PropertyEditForm({ property }: { property: Property }) {
         action={(fd) => {
           setError(null);
           setWarning(null);
+          // Switch state isn't in FormData by default; inject it.
+          fd.set('has_sidewalk', hasSidewalk ? 'on' : 'false');
           startTransition(async () => {
             try {
               const result = await updateProperty(property.id, fd);
@@ -167,6 +171,18 @@ export function PropertyEditForm({ property }: { property: Property }) {
             type="date"
             defaultValue={property.contract_end_date ?? ''}
           />
+        </div>
+        <div>
+          <Label htmlFor="tier">Tier (snow)</Label>
+          <Input id="tier" name="tier" defaultValue={property.tier ?? ''} placeholder="e.g. 1, 2, 3" />
+        </div>
+        <div className="flex items-end gap-3 pb-1">
+          <div className="flex items-center gap-2">
+            <Switch id="has_sidewalk" checked={hasSidewalk} onCheckedChange={setHasSidewalk} />
+            <Label htmlFor="has_sidewalk" className="cursor-pointer">
+              Has sidewalks (snow)
+            </Label>
+          </div>
         </div>
         <div className="md:col-span-2">
           <Label htmlFor="notes">Notes</Label>

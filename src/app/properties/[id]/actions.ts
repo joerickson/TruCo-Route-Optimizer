@@ -19,6 +19,8 @@ interface PropertyFields {
   contract_start_date: string | null;
   contract_end_date: string | null;
   notes: string | null;
+  tier: string | null;
+  has_sidewalk: boolean;
 }
 
 const VALID_SERVICES: ServiceType[] = ['weekly', 'biweekly', 'monthly'];
@@ -34,6 +36,8 @@ function readFields(formData: FormData): PropertyFields | { error: string } {
   const start = String(formData.get('contract_start_date') ?? '').trim() || null;
   const end = String(formData.get('contract_end_date') ?? '').trim() || null;
   const notes = String(formData.get('notes') ?? '').trim() || null;
+  const tier = String(formData.get('tier') ?? '').trim() || null;
+  const has_sidewalk = String(formData.get('has_sidewalk') ?? '') === 'on';
 
   if (!name) return { error: 'Name is required' };
   if (!address) return { error: 'Address is required' };
@@ -54,6 +58,8 @@ function readFields(formData: FormData): PropertyFields | { error: string } {
     contract_start_date: start,
     contract_end_date: end,
     notes,
+    tier,
+    has_sidewalk,
   };
 }
 
