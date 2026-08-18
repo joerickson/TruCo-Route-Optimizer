@@ -25,6 +25,8 @@ export interface Scenario {
   // Snow bid parameters (only meaningful when kind === 'snow').
   snow_window_hours: number;
   snow_sidewalk_hours: number;
+  // Operational cap: properties one truck/crew covers per storm. 0 = no cap (window-only).
+  snow_max_stops_per_crew: number;
   created_at: string;
 }
 

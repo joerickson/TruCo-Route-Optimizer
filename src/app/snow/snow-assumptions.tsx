@@ -18,10 +18,12 @@ export interface TierRow {
 export function SnowAssumptions({
   windowHours,
   sidewalkHours,
+  maxStopsPerCrew,
   tiers,
 }: {
   windowHours: number;
   sidewalkHours: number;
+  maxStopsPerCrew: number;
   tiers: TierRow[];
 }) {
   const router = useRouter();
@@ -30,6 +32,7 @@ export function SnowAssumptions({
   const [saved, setSaved] = useState(false);
   const [win, setWin] = useState(String(windowHours));
   const [walk, setWalk] = useState(String(sidewalkHours));
+  const [maxStops, setMaxStops] = useState(String(maxStopsPerCrew));
   const [rows, setRows] = useState<TierRow[]>(tiers);
 
   function save() {
@@ -41,6 +44,7 @@ export function SnowAssumptions({
       const res = await updateSnowSettings({
         windowHours: Number(win),
         sidewalkHours: Number(walk),
+        maxStopsPerCrew: Number(maxStops),
         tierPlowHours,
       });
       if (res.ok) {
@@ -79,6 +83,17 @@ export function SnowAssumptions({
               step="0.25"
               value={walk}
               onChange={(e) => setWalk(e.target.value)}
+            />
+          </div>
+          <div>
+            <Label htmlFor="snow_max_stops">Properties per truck (0 = no cap)</Label>
+            <Input
+              id="snow_max_stops"
+              type="number"
+              min="0"
+              step="1"
+              value={maxStops}
+              onChange={(e) => setMaxStops(e.target.value)}
             />
           </div>
         </div>

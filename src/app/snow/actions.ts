@@ -8,6 +8,7 @@ export type SnowSettingsResult = { ok: true } | { ok: false; error: string };
 export interface SnowSettingsInput {
   windowHours: number;
   sidewalkHours: number;
+  maxStopsPerCrew: number;
   // tier -> plow hours
   tierPlowHours: Record<string, number>;
 }
@@ -22,18 +23,26 @@ export async function updateSnowSettings(input: SnowSettingsInput): Promise<Snow
 
     const windowHours = Number(input.windowHours);
     const sidewalkHours = Number(input.sidewalkHours);
+    const maxStops = Number(input.maxStopsPerCrew);
     if (!Number.isFinite(windowHours) || windowHours <= 0) {
       return { ok: false, error: 'Design window must be a positive number of hours' };
     }
     if (!Number.isFinite(sidewalkHours) || sidewalkHours < 0) {
       return { ok: false, error: 'Sidewalk time must be zero or a positive number of hours' };
     }
+    if (!Number.isFinite(maxStops) || maxStops < 0) {
+      return { ok: false, error: 'Properties per truck must be zero (no cap) or a positive number' };
+    }
 
     const supabase = getServiceClient();
 
     const { error: scenErr } = await supabase
       .from('scenarios')
-      .update({ snow_window_hours: windowHours, snow_sidewalk_hours: sidewalkHours })
+      .update({
+        snow_window_hours: windowHours,
+        snow_sidewalk_hours: sidewalkHours,
+        snow_max_stops_per_crew: maxStops,
+      })
       .eq('id', scenarioId);
     if (scenErr) return { ok: false, error: scenErr.message };
 
