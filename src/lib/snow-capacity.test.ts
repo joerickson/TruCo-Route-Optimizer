@@ -51,6 +51,31 @@ describe('crewsForFleet', () => {
     const r = crewsForFleet([A, FAR], () => 0.9, 1);
     expect(r.crews).toBe(2);
   });
+
+  it('caps a crew at maxStops even when the window has room', () => {
+    // 6 nearby stops, tiny labor, huge window — window never binds, so the cap of 4 does.
+    const stops = [A, B, A, B, A, B];
+    const r = crewsForFleet(stops, () => 0.1, 100, 4);
+    expect(r.crews).toBe(2); // ceil(6 / 4)
+  });
+
+  it('with maxStops the count is ceil(stops / cap) when the window is slack', () => {
+    const stops = Array.from({ length: 10 }, () => A);
+    expect(crewsForFleet(stops, () => 0.01, 1000, 4).crews).toBe(3); // ceil(10/4)
+  });
+
+  it('maxStops <= 0 or omitted means no cap (window-only)', () => {
+    const stops = Array.from({ length: 6 }, () => A);
+    expect(crewsForFleet(stops, () => 0.1, 100).crews).toBe(1); // all fit the window
+    expect(crewsForFleet(stops, () => 0.1, 100, 0).crews).toBe(1);
+  });
+
+  it('the cap is authoritative — it wins even when the window is tighter', () => {
+    // 8 stops, each 1h labor, 1h window. Window-only would give 8 crews; a cap of 4 gives 2.
+    const stops = Array.from({ length: 8 }, () => A);
+    expect(crewsForFleet(stops, () => 1, 1).crews).toBe(8); // window-only
+    expect(crewsForFleet(stops, () => 1, 1, 4).crews).toBe(2); // cap wins: ceil(8/4)
+  });
 });
 
 describe('assignToNearestBranch', () => {

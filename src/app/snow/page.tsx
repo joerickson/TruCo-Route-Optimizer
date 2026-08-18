@@ -35,7 +35,7 @@ export default async function SnowPage() {
     await Promise.all([
       supabase
         .from('scenarios')
-        .select('name, kind, snow_window_hours, snow_sidewalk_hours')
+        .select('name, kind, snow_window_hours, snow_sidewalk_hours, snow_max_stops_per_crew')
         .eq('id', scenarioId)
         .single(),
       supabase.from('snow_tier_rates').select('tier, plow_hours').eq('scenario_id', scenarioId),
@@ -79,6 +79,7 @@ export default async function SnowPage() {
 
   const windowHours = Number(scenario.snow_window_hours);
   const sidewalkHours = Number(scenario.snow_sidewalk_hours);
+  const maxStopsPerCrew = Number(scenario.snow_max_stops_per_crew ?? 0);
 
   const properties: SnowProperty[] = ((propData ?? []) as Array<Record<string, unknown>>).map((p) => ({
     id: String(p.id),
@@ -107,7 +108,7 @@ export default async function SnowPage() {
   const tierPlowHours: Record<string, number> = {};
   for (const t of tierRows) tierPlowHours[t.tier] = t.plowHours;
 
-  const result = snowCapacity({ properties, branches, tierPlowHours, sidewalkHours, windowHours });
+  const result = snowCapacity({ properties, branches, tierPlowHours, sidewalkHours, windowHours, maxStopsPerCrew });
 
   const sidewalkCount = properties.filter((p) => p.has_sidewalk).length;
 
@@ -127,10 +128,13 @@ export default async function SnowPage() {
       <div>
         <h1 className="text-2xl font-bold tracking-tight">Snow bid — crews needed</h1>
         <p className="text-sm text-muted-foreground">
-          As-needed snow work sized against a per-storm window. Two fleets are sized independently per branch: plow
-          trucks (every rated property) and sidewalk crews (only properties with sidewalks). Crews dispatch from home,
-          so routes are open — travel is inter-stop only, no depot leg. {properties.length} geocoded properties ·{' '}
-          {branches.length} branches · {sidewalkCount} with sidewalks.
+          As-needed snow work sized per storm.{' '}
+          {maxStopsPerCrew > 0
+            ? `Each truck covers up to ${maxStopsPerCrew} properties.`
+            : `Each crew works within the ${windowHours}h window.`}{' '}
+          Two fleets are sized independently per branch: plow trucks (every rated property) and sidewalk crews (only
+          properties with sidewalks). Crews dispatch from home, so routes are open — no depot leg. {properties.length}{' '}
+          geocoded properties · {branches.length} branches · {sidewalkCount} with sidewalks.
         </p>
       </div>
 
@@ -165,7 +169,12 @@ export default async function SnowPage() {
         </div>
       )}
 
-      <SnowAssumptions windowHours={windowHours} sidewalkHours={sidewalkHours} tiers={tierRows} />
+      <SnowAssumptions
+        windowHours={windowHours}
+        sidewalkHours={sidewalkHours}
+        maxStopsPerCrew={maxStopsPerCrew}
+        tiers={tierRows}
+      />
 
       <Card>
         <CardHeader>

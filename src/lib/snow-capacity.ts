@@ -35,6 +35,10 @@ export interface SnowInputs {
   tierPlowHours: Record<string, number>;
   sidewalkHours: number;
   windowHours: number;
+  // Operational cap on how many properties one crew covers per storm ("4 properties
+  // per truck"). A crew closes at whichever binds first — this cap or the window.
+  // Omit / <= 0 for no cap (window-only sizing).
+  maxStopsPerCrew?: number;
 }
 
 export interface FleetResult {
@@ -87,21 +91,28 @@ function nearestNeighborOrder<T extends Coord>(stops: T[]): T[] {
   return order;
 }
 
-// Slice a fleet's stops into crews so each crew's route (Σ stop labor + Σ intra-crew
-// travel) fits the window. A crew's first stop has no incoming travel (home dispatch).
-// Returns crew count, total labor, realized travel (boundary hops excluded), and whether
-// any single stop alone blows the window.
+// Slice a fleet's stops into crews. Two sizing bases:
+//   - maxStops > 0 (operational "N properties per truck"): the cap is authoritative — a
+//     crew closes at N stops regardless of the window. This is how snow crews are planned.
+//   - maxStops <= 0 (window-only): a crew closes when its labor + intra-crew travel would
+//     exceed the window.
+// A crew's first stop has no incoming travel (home dispatch). Returns crew count, total
+// labor, realized travel (boundary hops excluded), and whether a single stop's labor
+// alone exceeds the window (informational).
 export function crewsForFleet<T extends Coord>(
   stops: T[],
   laborOf: (s: T) => number,
   windowHours: number,
+  maxStops = Infinity,
 ): FleetResult {
+  const cap = maxStops > 0 ? maxStops : Infinity;
+  const capMode = cap !== Infinity;
   const ordered = nearestNeighborOrder(stops);
   let crews = 0;
   let totalLabor = 0;
   let totalTravel = 0;
   let overWindow = false;
-  let current: { load: number; last: T } | null = null;
+  let current: { load: number; last: T; count: number } | null = null;
 
   for (const stop of ordered) {
     const stopLabor = laborOf(stop);
@@ -109,18 +120,22 @@ export function crewsForFleet<T extends Coord>(
     if (stopLabor > windowHours) overWindow = true;
 
     if (current === null) {
-      current = { load: stopLabor, last: stop };
+      current = { load: stopLabor, last: stop, count: 1 };
       crews += 1;
       continue;
     }
     const hop = driveHours(current.last, stop);
-    if (current.load + hop + stopLabor > windowHours) {
+    const shouldClose = capMode
+      ? current.count + 1 > cap
+      : current.load + hop + stopLabor > windowHours;
+    if (shouldClose) {
       // Close the current crew; the next stop begins a new crew (no incoming travel).
-      current = { load: stopLabor, last: stop };
+      current = { load: stopLabor, last: stop, count: 1 };
       crews += 1;
     } else {
       current.load += hop + stopLabor;
       current.last = stop;
+      current.count += 1;
       totalTravel += hop;
     }
   }
@@ -160,6 +175,7 @@ function isGeocoded(p: SnowProperty): boolean {
 
 export function snowCapacity(inputs: SnowInputs): SnowCapacityResult {
   const { branches, tierPlowHours, sidewalkHours, windowHours } = inputs;
+  const maxStops = inputs.maxStopsPerCrew ?? Infinity;
   const properties = inputs.properties.filter(isGeocoded);
 
   const ratedPlow = (p: SnowProperty): boolean => p.tier != null && p.tier in tierPlowHours;
@@ -177,8 +193,8 @@ export function snowCapacity(inputs: SnowInputs): SnowCapacityResult {
     return {
       branchId: g.id,
       branchName: g.name,
-      plow: crewsForFleet(plowStops, (p) => tierPlowHours[p.tier as string], windowHours),
-      sidewalk: crewsForFleet(sidewalkStops, () => sidewalkHours, windowHours),
+      plow: crewsForFleet(plowStops, (p) => tierPlowHours[p.tier as string], windowHours, maxStops),
+      sidewalk: crewsForFleet(sidewalkStops, () => sidewalkHours, windowHours, maxStops),
     };
   });
 
