@@ -183,7 +183,15 @@ async function applyRows(rows: AspireImportRow[], scenarioId: string): Promise<{
   let inserted = 0;
   let updated = 0;
 
-  const withExt = rows.filter((r) => r.external_id);
+  // A single upload can contain two rows that resolve to the same conflict target
+  // (e.g. a repeated external_id, or two rows with the same name+address). Postgres
+  // rejects an ON CONFLICT statement that would touch the same row twice
+  // ("ON CONFLICT DO UPDATE command cannot affect row a second time"), so we collapse
+  // duplicates in-app before every batch write. Last occurrence wins, matching upsert.
+  const withExt = dedupeByKey(
+    rows.filter((r) => r.external_id),
+    (r) => r.external_id!,
+  );
   const noExt = rows.filter((r) => !r.external_id);
 
   if (withExt.length > 0) {
@@ -220,9 +228,13 @@ async function applyRows(rows: AspireImportRow[], scenarioId: string): Promise<{
       idByKey.set(keyOf(p.name, p.address), p.id);
     }
 
+    // Dedupe within the upload by name+address so two rows for the same property
+    // don't collide (insert dupes, or upsert the same id twice). Last occurrence wins.
+    const deduped = dedupeByKey(noExt, (r) => keyOf(r.name, r.address));
+
     const toInsert: AspireImportRow[] = [];
     const toUpdate: Array<AspireImportRow & { id: string }> = [];
-    for (const r of noExt) {
+    for (const r of deduped) {
       const id = idByKey.get(keyOf(r.name, r.address));
       if (id) toUpdate.push({ ...r, id });
       else toInsert.push(r);
@@ -248,6 +260,14 @@ async function applyRows(rows: AspireImportRow[], scenarioId: string): Promise<{
   }
 
   return { inserted, updated };
+}
+
+// Collapse rows that share a conflict key, keeping the last occurrence. Preserves
+// input order among the survivors so downstream counts/logging stay stable.
+function dedupeByKey<T>(rows: T[], keyOf: (r: T) => string): T[] {
+  const byKey = new Map<string, T>();
+  for (const r of rows) byKey.set(keyOf(r), r);
+  return Array.from(byKey.values());
 }
 
 // The DB column subset of an AspireImportRow (excludes external_id/id and the
